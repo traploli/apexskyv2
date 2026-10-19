@@ -74,8 +74,12 @@ def candidates(group: str, key: str):
         return [("ConVars", key)]
     if key.startswith("DT_"):
         return [("RecvTable." + key, key)]
-    if key.startswith("C_"):
-        return [("DataMap." + key, key), ("RecvTable." + key, key)]
+    if group.startswith("C_"):
+        # The API uses underscores for this nested datamap field, while the
+        # native Apexsky profile uses the dotted INI spelling.
+        if group == "C_BaseEntity" and key == "m_currentFrame_viewOffset":
+            return [("DataMap.C_BaseEntity", "m_currentFrame.viewOffset")]
+        return [("DataMap." + group, key), ("RecvTable." + group, key)]
     return [(group, key), ("DataMap." + group, key), ("RecvTable." + group, key)]
 
 

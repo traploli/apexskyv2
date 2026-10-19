@@ -40,6 +40,19 @@ class UpdaterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             update_offsets.validate_candidate(broken)
 
+    def test_nested_current_frame_view_offset_maps_to_native_key(self):
+        payload = {"offsets": {"structs": {"C_BaseEntity": {}}}, "offsets_flat": {
+            "C_BaseEntity.m_currentFrame_viewOffset": "0xdc",
+        }}
+        native = self.ini + "[DataMap.C_BaseEntity]\nm_currentFrame.viewOffset=0xe8\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "offsets.ini"
+            path.write_text(native)
+            _, changed, updates, unmatched = update_offsets.merge(path, payload)
+            self.assertEqual(1, len(updates))
+            self.assertEqual([], unmatched)
+            self.assertIn("m_currentFrame.viewOffset=0xdc", changed)
+
     def test_malformed_api_value_is_not_applied(self):
         payload = {"offsets": {"structs": {"misc": {}}}, "offsets_flat": {
             "misc.LocalPlayer": "not-hex",
