@@ -1,0 +1,79 @@
+# 0. Enable web_sys_unstable_apis for bevy_egui
+
+[build]
+rustflags = ["--cfg=web_sys_unstable_apis"]
+
+# 1. Set up cargo to use wasm-server-runner.
+
+# https://bevy-cheatbook.github.io/platforms/wasm.html
+# The easiest and most automatic way to get started is the wasm-server-runner tool. It is great for testing during development.
+[target.wasm32-unknown-unknown]
+runner = "wasm-server-runner"
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
+# 2. Bevy fast build configuration
+
+# Add the contents of this file to `config.toml` to enable "fast build" configuration. Please read the notes below.
+
+# NOTE: For maximum performance, build using a nightly compiler
+# If you are using rust stable, remove the "-Zshare-generics=y" below.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = [
+  "-Clink-arg=-fuse-ld=lld",      # Use LLD Linker
+  "-Ctarget-feature=+avx2,+fma",  # Use AVX2
+  "-Zshare-generics=y",           # (Nightly) Make the current crate share its generic instantiations
+  "-Zthreads=0",                  # (Nightly) Use improved multithreading with the recommended amount of threads.
+  "-Zmacro-backtrace",
+]
+
+# NOTE: you must install [Mach-O LLD Port](https://lld.llvm.org/MachO/index.html) on mac. you can easily do this by installing llvm which includes lld with the "brew" package manager:
+# `brew install llvm`
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-Clink-arg=-fuse-ld=/usr/local/opt/llvm/bin/ld64.lld", # Use LLD Linker
+  "-Ctarget-feature=+avx2,+fma",                          # Use AVX2
+  "-Zshare-generics=y",                                   # (Nightly) Make the current crate share its generic instantiations
+  "-Zthreads=0",                                          # (Nightly) Use improved multithreading with the recommended amount of threads.
+]
+
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-Clink-arg=-fuse-ld=/opt/homebrew/opt/llvm/bin/ld64.lld", # Use LLD Linker
+  "-Zshare-generics=y",                                      # (Nightly) Make the current crate share its generic instantiations
+  "-Zthreads=0",                                             # (Nightly) Use improved multithreading with the recommended amount of threads.
+]
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"           # Use LLD Linker
+rustflags = [
+  "-Ctarget-feature=+avx2,+fma",  # Use AVX2
+  "-Zshare-generics=n",
+  "-Zthreads=0",                  # (Nightly) Use improved multithreading with the recommended amount of threads.
+]
+
+# Optional: Uncommenting the following improves compile times, but reduces the amount of debug info to 'line number tables only'
+# In most cases the gains are negligible, but if you are on macos and have slow compile times you should see significant gains.
+#[profile.dev]
+#debug = 1
+
+[profile.release]
+debug = "full"
+# Enable more optimization in the release profile at the cost of compile time.
+# Compile the entire crate as one unit.
+# Slows compile times, marginal improvements.
+codegen-units = 1
+# Do a second optimization pass over the entire program, including dependencies.
+# Slows compile times, marginal improvements.
+lto = "thin"
+
+# Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
+[profile.wasm-release]
+# Default to release profile values.
+inherits = "release"
+# Optimize with size in mind (also try "z", sometimes it is better).
+# Slightly slows compile times, great improvements to file size and runtime performance.
+opt-level = "s"
+# Strip all debugging information from the binary to slightly reduce file size.
+strip = "debuginfo"

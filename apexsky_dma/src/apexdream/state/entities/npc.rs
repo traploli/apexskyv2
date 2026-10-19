@@ -1,0 +1,270 @@
+use super::*;
+
+#[derive(Default, Debug, Clone)]
+pub struct BaseNPCEntity {
+    pub entity_ptr: sdk::Ptr,
+    pub entity_size: u32,
+    pub index: u32,
+
+    pub origin: [f32; 3],
+    pub angles: [f32; 3],
+    pub velocity: [f32; 3],
+    pub accel: [f32; 3],
+    pub derivative_origin: EstimateDerivative,
+    pub derivative_velocity: EstimateDerivative,
+
+    pub health: i32,
+    pub max_health: i32,
+    pub shields: i32,
+    pub max_shields: i32,
+    pub health_history: Vec<ValueChanged<i32>>,
+
+    pub team_num: i32,
+    pub team_color: [u8; 3],
+
+    pub model_name: ModelName,
+    pub studio: StudioModel,
+    pub bones: super::BoneArray,
+
+    pub skin: i32,
+    pub skin_mod: i32,
+    pub body: i32,
+    pub camo_index: i32,
+
+    pub flags: u32,
+    pub life_state: u8,
+    pub last_visible_time: f32,
+    pub crosshair_target_start_time: f32,
+    pub last_crosshair_target_time: f32,
+    pub tmp_last_lastviz: f32,
+    pub tmp_last_last_crosshair_target: f32,
+    pub tmp_last_postcheck_time: f64,
+    pub is_visible: bool,
+    pub is_crosshair_target: bool,
+    pub visible_time: f64,
+}
+impl BaseNPCEntity {
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(entity_ptr: sdk::Ptr, index: u32, cc: &sdk::ClientClass) -> Box<dyn Entity> {
+        let entity_size = cc.ClassSize;
+        Box::new(BaseNPCEntity {
+            entity_ptr,
+            entity_size,
+            index,
+            ..BaseNPCEntity::default()
+        }) as Box<dyn Entity>
+    }
+    pub fn is_alive(&self) -> bool {
+        self.life_state == 0
+    }
+    pub fn is_onground(&self) -> bool {
+        self.flags & 0x1 != 0
+    }
+    pub fn is_ducking(&self) -> bool {
+        self.flags & 0x2 != 0
+    }
+    pub fn height(&self) -> f32 {
+        if self.is_ducking() { 36.0 } else { 60.0 }
+    }
+    pub fn get_bone_pos(&self, bone: usize) -> [f32; 3] {
+        sdk::add(self.origin, self.bones.get_pos(bone))
+    }
+}
+#[async_trait]
+impl Entity for BaseNPCEntity {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_ref(&self) -> EntityRef<'_> {
+        EntityRef::BaseNPC(self)
+    }
+    fn is_serialized(&self) -> bool {
+        false
+    }
+    fn get_info(&self) -> EntityInfo {
+        EntityInfo {
+            entity_ptr: self.entity_ptr,
+            index: self.index as usize,
+            handle: sdk::EHandle::from(self.index),
+            rate: 1,
+        }
+    }
+    #[instrument(skip_all, fields(index = self.index))]
+    async fn update(&mut self, api: &Api, ctx: &UpdateContext) {
+        #[derive(sdk::FromBytes, sdk::IntoBytes)]
+        #[repr(C)]
+        struct Indices {
+            origin: [u32; 6],
+            health: [u32; 4],
+            team: [u32; 1],
+            model_name: [u32; 2],
+            bone_array: [u32; 2],
+            studio: [u32; 2],
+            skin: [u32; 4],
+            state: [u32; 5],
+            //collision: [u32; 7],
+        }
+
+        let data = &ctx.data;
+        let mut indices = Indices {
+            origin: [
+                data.entity_origin,
+                data.entity_origin + 4,
+                data.entity_origin + 8,
+                data.entity_origin + 24,
+                data.entity_origin + 28,
+                data.entity_origin + 32,
+            ],
+            health: [
+                data.entity_health,
+                data.entity_max_health,
+                data.entity_shield_health,
+                data.entity_shield_health + 4,
+            ],
+            team: [data.entity_team_num],
+            model_name: [data.entity_model_name, data.entity_model_name + 4],
+            bone_array: [data.animating_bone_array, data.animating_bone_array + 4],
+            studio: [data.animating_studiohdr, data.animating_studiohdr + 4],
+            skin: [
+                data.animating_skin,
+                data.animating_skin + 4,
+                data.animating_skin + 8,
+                data.animating_skin + 12,
+            ],
+            state: [
+                data.entity_flags,
+                data.entity_life_state,
+                data.player_last_visible_time,
+                data.player_last_visible_time + 4,
+                data.player_last_visible_time + 8,
+            ],
+            // collision: [
+            //     data.entity_collision + data.collision_property_vec_mins,
+            //     data.entity_collision + data.collision_property_vec_mins + 4,
+            //     data.entity_collision + data.collision_property_vec_mins + 8,
+            //     data.entity_collision + data.collision_property_vec_maxs,
+            //     data.entity_collision + data.collision_property_vec_maxs + 4,
+            //     data.entity_collision + data.collision_property_vec_maxs + 8,
+            //     data.entity_collision_group,
+            // ],
+        };
+
+        if let Ok(fields) = api
+            .vm_gatherd(self.entity_ptr, self.entity_size, true, &mut indices)
+            .await
+        {
+            self.origin = [
+                f32::from_bits(fields.origin[0]),
+                f32::from_bits(fields.origin[1]),
+                f32::from_bits(fields.origin[2]),
+            ];
+            if self.origin[0].is_nan() || self.origin[1].is_nan() || self.origin[2].is_nan() {
+                tracing::warn!(?self.origin);
+            }
+
+            self.angles = [
+                f32::from_bits(fields.origin[3]),
+                f32::from_bits(fields.origin[4]),
+                f32::from_bits(fields.origin[5]),
+            ];
+            if self.angles[0].is_nan() || self.angles[1].is_nan() || self.angles[2].is_nan() {
+                tracing::warn!(?self.angles);
+            }
+
+            let estvel = self.derivative_origin.update(ctx.time, self.origin, 0.1);
+            self.velocity = estvel;
+
+            self.accel = self
+                .derivative_velocity
+                .update(ctx.time, self.velocity, 0.1);
+
+            let health = fields.health[0] as i32;
+            let shields = fields.health[2] as i32;
+
+            if health > 1000 || shields > 1000 || health < 0 || shields < 0 {
+                tracing::debug!(health, shields);
+                self.health = 0;
+                self.shields = 0;
+            } else {
+                if health + shields != self.health + self.shields {
+                    self.health_history.push(ValueChanged::new(
+                        ctx.time,
+                        self.health + self.shields,
+                        health + shields,
+                    ));
+                }
+                self.health = health;
+                self.shields = shields;
+            }
+
+            self.max_health = fields.health[1] as i32;
+            self.max_shields = fields.health[3] as i32;
+
+            self.team_num = fields.team[0] as i32;
+
+            let model_name_ptr =
+                fields.model_name[0] as u64 | ((fields.model_name[1] as u64) << 32);
+            let studio_ptr = fields.studio[0] as u64 | ((fields.studio[1] as u64) << 32);
+            let bones_ptr = fields.bone_array[0] as u64 | ((fields.bone_array[1] as u64) << 32);
+
+            tokio::join!(self.model_name.update(api, model_name_ptr.into()), async {
+                let _ = self
+                    .studio
+                    .update(api, sdk::Ptr::from_raw(studio_ptr))
+                    .await;
+                self.bones
+                    .update(api, ctx, &self.studio, sdk::Ptr::from_raw(bones_ptr))
+                    .await;
+            });
+
+            self.skin = fields.skin[0] as i32;
+            self.skin_mod = fields.skin[1] as i32;
+            self.body = fields.skin[2] as i32;
+            self.camo_index = fields.skin[3] as i32;
+
+            self.flags = fields.state[0];
+            self.life_state = fields.state[1] as u8;
+            self.last_visible_time = f32::from_bits(fields.state[2]);
+            self.crosshair_target_start_time = f32::from_bits(fields.state[3]);
+            self.last_crosshair_target_time = f32::from_bits(fields.state[4]);
+
+            // let collision = (
+            //     [
+            //         f32::from_bits(fields.collision[0]),
+            //         f32::from_bits(fields.collision[1]),
+            //         f32::from_bits(fields.collision[2]),
+            //     ],
+            //     [
+            //         f32::from_bits(fields.collision[3]),
+            //         f32::from_bits(fields.collision[4]),
+            //         f32::from_bits(fields.collision[5]),
+            //     ],
+            // );
+            // let collision_group = fields.collision[6] as i32;
+
+            // println!("collision:{collision:?} grp:{collision_group:?}");
+        }
+    }
+    #[instrument(skip_all)]
+    fn post(&mut self, _api: &Api, ctx: &UpdateContext, _state: &GameState) {
+        // Check if npc is visible
+        // let is_visible = self.last_visible_time > 0.0
+        //     && (self.last_visible_time - state.client.curtime).abs() < 0.1;
+        if ctx.time > self.tmp_last_postcheck_time + 0.050 {
+            let is_visible = self.last_visible_time > self.tmp_last_lastviz;
+            //tracing::trace!(is_visible, self.last_visible_time, self.tmp_last_lastviz);
+            // Take note when the npc became visible
+            if !self.is_visible && is_visible {
+                self.visible_time = ctx.time;
+            }
+            self.is_visible = is_visible;
+
+            self.is_crosshair_target =
+                self.last_crosshair_target_time > self.tmp_last_last_crosshair_target;
+
+            self.tmp_last_lastviz = self.last_visible_time;
+            self.tmp_last_last_crosshair_target = self.last_crosshair_target_time;
+            self.tmp_last_postcheck_time = ctx.time;
+        }
+    }
+}

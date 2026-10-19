@@ -1,0 +1,42 @@
+[package]
+name = "apex1_common"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "apex1_common"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+anyhow = { version = "1.0.102", features = ["backtrace"] }
+chrono = "0.4.44"
+config = { version = "0.15.22", default-features = false, features = ["toml"] }
+dashmap = { version = "6.1.0", features = ["serde"] }
+entropy = "0.4.3"
+hex = { version = "0.4.3", features = ["serde"] }
+include-flate = "0.3.3"
+indexmap = { version = "2.14.0", features = ["serde"] }
+named_constants = "0.2.0"
+obfstr = "0.4.4"
+ohosky_api = { path = "../../ohosky_sdk/ohosky_api", default-features = false }
+parking_lot = { version = "0.12.5", features = ["nightly"] }
+prost = "0.14.3"
+rand = "0.10.1"
+rkyv = "0.8.16"
+secrecy = "0.10.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+toml = "1.1.2"
+tonic = { version = "0.14.5", optional = true }
+tonic-prost = { version = "0.14.5", optional = true }
+tracing = "0.1.44"
+
+[build-dependencies]
+tonic-prost-build = "0.14.5"
+
+[features]
+default = []
+data = []
+native = ["data", "tonic", "tonic-prost"]
+ohosky = ["ohosky_api/ohosky", "data"]
+skydream = ["ohosky_api/skydream", "native"]

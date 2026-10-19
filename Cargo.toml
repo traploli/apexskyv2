@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "apex1_common",
+    "apex1_offsets_parser",
+    "apexsky_dma",
+    "apexsky_overlay",
+]
+default-members = ["apexsky_dma"]
