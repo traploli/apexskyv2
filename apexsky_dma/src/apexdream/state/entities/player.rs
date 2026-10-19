@@ -697,7 +697,11 @@ impl Entity for PlayerEntity {
 fn validate_vec3(val: [f32; 3]) -> [f32; 3] {
     if val[0].is_nan() || val[1].is_nan() || val[2].is_nan() {
         let caller = std::panic::Location::caller();
-        tracing::warn!(?val, ?caller);
+        // Invalid entity snapshots are expected while entities spawn/despawn or
+        // when a field is temporarily unreadable. Keep this diagnostic out of
+        // the default terminal logger: the TUI shares the same terminal, and a
+        // warning here on every player update destroys the alternate screen.
+        tracing::debug!(?val, ?caller, "invalid player vector");
     }
     val
 }

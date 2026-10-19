@@ -485,7 +485,7 @@ fn init_logger(print: bool) -> tracing_appender::non_blocking::WorkerGuard {
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| {
             EnvFilter::try_new(s!(
-                "apexsky_dma=warn,apex1_common=warn,apexsky_dma::apexdream=warn,apexsky_dma::actuator=info,apexsky_dma::workers::aim=warn,apexsky_dma::workers::actions=warn,apexsky_dma::workers::esp=warn,apexsky_dma::workers::web=warn,apexsky_dma::workers::items=info"
+                "apexsky_dma=error,apex1_common=error,apexsky_dma::apexdream=error,apexsky_dma::actuator=info,apexsky_dma::workers::aim=error,apexsky_dma::workers::actions=error,apexsky_dma::workers::esp=error,apexsky_dma::workers::web=error,apexsky_dma::workers::items=info"
             ))
         })
         .unwrap();
