@@ -1,0 +1,70 @@
+# Conservative diagnostic profile: keep basic ESP, disable active/write features.
+[settings]
+load_settings = true
+esp = true
+firing_range = false
+team_death_match = false
+esp_web_server = false
+no_esp_service = true
+
+[settings.aimbot_settings]
+aimbot_on_fire = false
+aimbot_on_ads = false
+auto_shoot = false
+auto_nade_aim = false
+no_recoil = false
+aim_mode = 0
+
+[settings.feature_settings]
+auto_super_glide = false
+auto_super_grapple = false
+auto_tap_strafe = false
+hvh = false
+kbd_backlight_control = false
+mini_map_radar = false
+main_radar_map = false
+map_radar_testing = false
+onevone = false
+show_aim_target = false
+show_deathbox = false
+
+[settings.glow_settings]
+loot_filled_toggle = false
+player_filled_toggle = false
+item_glow = false
+player_glow = false
+player_glow_armor_color = false
+player_glow_love_user = false
+weapon_model_glow = false
+weapon_model_transparent = false
+
+[settings.loot]
+skull = false
+lightbackpack = false
+medbackpack = false
+heavybackpack = false
+goldbackpack = false
+shieldupgrade1 = false
+shieldupgrade2 = false
+shieldupgrade3 = false
+shieldupgrade4 = false
+shieldupgrade5 = false
+shieldupgradehead1 = false
+shieldupgradehead2 = false
+shieldupgradehead3 = false
+shieldupgradehead4 = false
+shielddown1 = false
+shielddown2 = false
+shielddown3 = false
+shielddown4 = false
+accelerant = false
+phoenix = false
+healthlarge = false
+healthsmall = false
+shieldbattsmall = false
+shieldbattlarge = false
+sniperammo = false
+heavyammo = false
+lightammo = false
+energyammo = false
+shotgunammo = false

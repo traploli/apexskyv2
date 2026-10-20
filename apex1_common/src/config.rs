@@ -39,6 +39,22 @@ pub struct DeviceConfig {
     pub use_kmbox_b: bool,
     pub qemu_qmp_addr: String,
     pub use_qemu_qmp: bool,
+    /// Resolves the secondary CR3 for shadow-pointer fields with a real memflow connector
+    /// (see `apexsky_dma::apexdream::base::cr3`) instead of the degraded `IMemAccess`
+    /// default-unsupported path. `#[serde(default)]` so configs saved before this field
+    /// existed still deserialize.
+    #[serde(default)]
+    pub use_memflow_direct: bool,
+    /// memflow connector plugin identifier, e.g. `"kvm"` for `libmemflow_kvm.so`.
+    #[serde(default)]
+    pub memflow_connector_name: String,
+    /// Arguments passed to the connector's `FromStr`, typically the target VM/domain name.
+    #[serde(default)]
+    pub memflow_connector_args: String,
+    /// Directory to scan for memflow connector plugin libraries. Empty uses
+    /// `Inventory::scan()`'s default search paths (cwd, `$MEMFLOW_PLUGIN_PATH`, etc.)
+    #[serde(default)]
+    pub memflow_plugin_dir: String,
 }
 
 #[repr(C)]
@@ -303,7 +319,7 @@ impl Default for EspServiceConfig {
 impl Default for DeviceConfig {
     fn default() -> Self {
         let data = format!(
-            "{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             s!("{"),
             s!("\"kmbox_net_addr\":\"127.0.0.1:1234\","),
             s!("\"kmbox_net_mac\":\"48656c6c\","),
@@ -312,7 +328,11 @@ impl Default for DeviceConfig {
             s!("\"kmbox_b_baud\":115200,"),
             s!("\"use_kmbox_b\": false,"),
             s!("\"qemu_qmp_addr\": \"/tmp/qmp-win11.sock\","),
-            s!("\"use_qemu_qmp\": false"),
+            s!("\"use_qemu_qmp\": false,"),
+            s!("\"use_memflow_direct\": false,"),
+            s!("\"memflow_connector_name\": \"kvm\","),
+            s!("\"memflow_connector_args\": \"\","),
+            s!("\"memflow_plugin_dir\": \"\""),
             s!("}")
         );
         serde_json::from_str(&data).unwrap()

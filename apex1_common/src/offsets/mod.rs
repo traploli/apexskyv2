@@ -131,6 +131,13 @@ import_custom_offsets!({
     entity_team_num,
     centity_abs_velocity,
     centity_velocity,
+    // Local-player-only duplicate of `centity_origin`'s resolved value, readable under the
+    // *primary* DTB. `centity_origin` on current clients is a shadow pointer: the real vector
+    // only exists in a region mapped under a secondary page-table root. This duplicate exists
+    // for the local player specifically (it has no analogue on remote entities) and is used
+    // purely to validate a candidate secondary DTB — by distance, not exact match, since it is
+    // not guaranteed to be sampled on the same tick as the shadow copy.
+    player_abs_origin_shadow_dup,
     entity_owner_entity,
     entity_collision,
     entity_collision_group,

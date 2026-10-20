@@ -281,7 +281,18 @@ impl Entity for PlayerEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 6],
+            // `entity_origin` now holds `absOriginShadowPtr`, not the vector itself — the first
+            // two gathered dwords are the 64-bit shadow pointer (dereferenced below under a
+            // validated secondary DTB); `angles` sits 24 bytes past the old inline vec3's base
+            // and is untouched by the swap, so it's still read inline under the primary DTB.
+            origin_shadow_ptr: [u32; 2],
+            angles: [u32; 3],
+            // Local-player-only duplicate of the shadow-resolved origin, readable inline under
+            // the primary DTB — used to cross-validate the secondary DTB by distance (never
+            // equality: it isn't guaranteed to be sampled on the same tick as the shadow read).
+            // Harmless to gather for remote players too; it's only interpreted below when
+            // `self` is the local player.
+            abs_origin_dup: [u32; 3],
             velocity: [u32; 3],
             health: [u32; 6],
             team: [u32; 4],
@@ -317,13 +328,16 @@ impl Entity for PlayerEntity {
 
         let data = &ctx.data;
         let mut indices = Indices {
-            origin: [
-                data.entity_origin,
-                data.entity_origin + 4,
-                data.entity_origin + 8,
+            origin_shadow_ptr: [data.entity_origin, data.entity_origin + 4],
+            angles: [
                 data.entity_origin + 24,
                 data.entity_origin + 28,
                 data.entity_origin + 32,
+            ],
+            abs_origin_dup: [
+                data.player_abs_origin_shadow_dup,
+                data.player_abs_origin_shadow_dup + 4,
+                data.player_abs_origin_shadow_dup + 8,
             ],
             velocity: [
                 data.entity_velocity,
@@ -469,15 +483,52 @@ impl Entity for PlayerEntity {
                 return;
             }
 
-            self.origin = validate_vec3([
-                f32::from_bits(fields.origin[0]),
-                f32::from_bits(fields.origin[1]),
-                f32::from_bits(fields.origin[2]),
-            ]);
+            let origin_shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
+            match crate::apexdream::base::cr3::read_shadow::<[f32; 3]>(
+                api,
+                origin_shadow_ptr,
+                api.apex_base.into_raw(),
+            )
+            .await
+            {
+                Ok(origin) => {
+                    self.origin = validate_vec3(origin);
+
+                    // Local-player-only secondary-DTB cross-check: the dup is readable inline
+                    // under the primary DTB, so it has no bearing on remote players at all —
+                    // only meaningful once we know `self` *is* the local player.
+                    if ctx.local_entity == sdk::EHandle::from(self.index) {
+                        let dup = [
+                            f32::from_bits(fields.abs_origin_dup[0]),
+                            f32::from_bits(fields.abs_origin_dup[1]),
+                            f32::from_bits(fields.abs_origin_dup[2]),
+                        ];
+                        // One tick of max player movement plus slack: the dup and the shadow
+                        // copy are not guaranteed to be sampled on the same tick.
+                        const MAX_DRIFT: f32 = 512.0;
+                        if dup != [0.0; 3]
+                            && !crate::apexdream::base::cr3::validate_by_distance(
+                                self.origin,
+                                dup,
+                                MAX_DRIFT,
+                            )
+                        {
+                            tracing::warn!(
+                                shadow_origin = ?self.origin,
+                                abs_origin_dup = ?dup,
+                                "{}",
+                                s!("local player shadow absOrigin disagrees with its primary-DTB duplicate past tolerance — secondary CR3 may be stale")
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::trace!(?e, entity_ptr = ?self.entity_ptr, "shadow absOrigin read failed, keeping last-good"),
+            }
             self.angles = validate_vec3([
-                f32::from_bits(fields.origin[3]),
-                f32::from_bits(fields.origin[4]),
-                f32::from_bits(fields.origin[5]),
+                f32::from_bits(fields.angles[0]),
+                f32::from_bits(fields.angles[1]),
+                f32::from_bits(fields.angles[2]),
             ]);
             self.velocity = validate_vec3([
                 f32::from_bits(fields.velocity[0]),

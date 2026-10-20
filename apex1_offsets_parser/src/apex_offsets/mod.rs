@@ -537,6 +537,12 @@ export_custom_offsets!(
         entity_team_num: off!(offsets.dt_base_entity.m_i_team_num),
         centity_abs_velocity: off!(offsets.c_base_entity1.m_vec_abs_velocity),
         centity_velocity: off!(offsets.c_base_entity1.m_vec_velocity),
+        // No symbolic RecvTable/DataMap name is known for this one — it's a local-player-only
+        // duplicate used purely to validate the secondary CR3 the shadow-origin pointer needs,
+        // so it's carried as the literal offset-from-local-player-base reported alongside the
+        // shadow-pointer change itself, the same way `input_selected_slot`/`input_button_state`
+        // above are literals rather than `off!(...)` lookups.
+        player_abs_origin_shadow_dup: 0x375c,
         entity_owner_entity: off!(offsets.dt_base_entity.m_h_owner_entity),
         entity_collision: off!(offsets.dt_base_entity.m_collision),
         entity_collision_group: off!(offsets.dt_base_entity.m_collision_group),

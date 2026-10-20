@@ -71,9 +71,25 @@ impl Entity for BaseEntity {
         // let _ = process.vm_read_into(entity_ptr.field(data.entity_signifier_name + 9), &mut self.signifier_name).await;
 
         let task_update_origin = async {
-            let _ = api
-                .vm_read_into(entity_ptr.field(data.entity_origin), &mut self.origin)
-                .await;
+            // `entity_origin` now holds `absOriginShadowPtr`, not the vector itself: read the
+            // pointer under the primary DTB, then dereference it under a validated secondary
+            // DTB. Any failure keeps `self.origin` at its last known-good value instead of
+            // writing a zeroed/garbage vector.
+            match api.vm_read::<u64>(entity_ptr.field(data.entity_origin)).await {
+                Ok(shadow_ptr) => {
+                    match crate::apexdream::base::cr3::read_shadow::<[f32; 3]>(
+                        api,
+                        shadow_ptr,
+                        api.apex_base.into_raw(),
+                    )
+                    .await
+                    {
+                        Ok(origin) => self.origin = origin,
+                        Err(e) => tracing::trace!(?e, entity_ptr = ?self.entity_ptr, "shadow absOrigin read failed, keeping last-good"),
+                    }
+                }
+                Err(e) => tracing::trace!(?e, entity_ptr = ?self.entity_ptr, "absOrigin shadow pointer read failed"),
+            }
         }
         .instrument(tracing::info_span!("1"));
 

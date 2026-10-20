@@ -416,5 +416,167 @@ pub(super) fn build_aimbot_menu(
             },
             (),
         )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("19 - Smoothing mode (0 Damp, 1 Linear, 2 Bezier, 3 Cubic, 4 S-Curve, 5 Auto)"),
+                Span::from(settings.aimbot_settings.smoothing_mode.to_string()),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(mode) = val.trim().parse::<u8>() && mode <= 5 {
+                    lock_config!().settings.aimbot_settings.smoothing_mode = mode;
+                    return None;
+                }
+                Some("smoothing mode must be 0..5".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("20 - Dead-zone pitch (degrees)"),
+                Span::from(format!("{:.3}", settings.aimbot_settings.dead_zone_pitch)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (0.0..=20.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.dead_zone_pitch = value;
+                    return None;
+                }
+                Some("dead-zone pitch must be between 0 and 20".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("21 - Dead-zone yaw (degrees)"),
+                Span::from(format!("{:.3}", settings.aimbot_settings.dead_zone_yaw)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (0.0..=20.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.dead_zone_yaw = value;
+                    return None;
+                }
+                Some("dead-zone yaw must be between 0 and 20".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("22 - Bullet speed multiplier"),
+                Span::from(format!("{:.3}", settings.aimbot_settings.bullet_speed_multiplier)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (0.1..=3.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.bullet_speed_multiplier = value;
+                    return None;
+                }
+                Some("bullet speed multiplier must be between 0.1 and 3".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("23 - Bullet gravity multiplier"),
+                Span::from(format!("{:.3}", settings.aimbot_settings.bullet_gravity_multiplier)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (0.0..=3.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.bullet_gravity_multiplier = value;
+                    return None;
+                }
+                Some("bullet gravity multiplier must be between 0 and 3".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("24 - Aim offset multiplier"),
+                Span::from(format!("{:.3}", settings.aimbot_settings.aim_offset_multiplier)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (0.0..=3.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.aim_offset_multiplier = value;
+                    return None;
+                }
+                Some("aim offset multiplier must be between 0 and 3".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                format!("25 - Bow vertical adjustment"),
+                Span::from(format!("{:.2}", settings.aimbot_settings.bow_adjust)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (-200.0..=200.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.bow_adjust = value;
+                    return None;
+                }
+                Some("bow adjustment must be between -200 and 200".to_string())
+            },
+            (),
+        )
+        .add_toggle_item(
+            "26 - Bow adjustment enabled",
+            settings.aimbot_settings.bow_adjust != 0.0,
+            |_ctx, _| {
+                let settings = &mut lock_config!().settings.aimbot_settings;
+                if settings.bow_adjust == 0.0 { settings.bow_adjust = 1.0; } else { settings.bow_adjust = 0.0; }
+                None
+            },
+        )
+        .add_toggle_item(
+            "27 - Sheila adjustment enabled",
+            settings.aimbot_settings.on_sheila,
+            |_ctx, _| {
+                let settings = &mut lock_config!().settings.aimbot_settings;
+                settings.on_sheila = !settings.on_sheila;
+                None
+            },
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                "29 - Trigger hold (ms)".to_string(),
+                Span::from(settings.aimbot_settings.trigger_hold_ms.to_string()),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<u64>() && (1..=500).contains(&value) {
+                    lock_config!().settings.aimbot_settings.trigger_hold_ms = value;
+                    return None;
+                }
+                Some("trigger hold must be between 1 and 500 ms".to_string())
+            },
+            (),
+        )
+        .add_input_item(
+            menu_fmt.format_item(
+                "30 - Trigger reactivation (ms)".to_string(),
+                Span::from(settings.aimbot_settings.trigger_again_ms.to_string()),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<u64>() && (1..=1000).contains(&value) {
+                    lock_config!().settings.aimbot_settings.trigger_again_ms = value;
+                    return None;
+                }
+                Some("trigger reactivation must be between 1 and 1000 ms".to_string())
+            },
+            (),
+        )
+        .add_toggle_item(
+            "28 - Hold Sheila",
+            settings.aimbot_settings.hold_sheila,
+            |_ctx, _| {
+                let settings = &mut lock_config!().settings.aimbot_settings;
+                settings.hold_sheila = !settings.hold_sheila;
+                None
+            },
+        )
         .into()
 }

@@ -219,7 +219,10 @@ pub fn export_new_items(loots: Vec<LootInt>) -> anyhow::Result<()> {
     for item in &loots {
         let Some(model) = ITEM_LIST.get(&item.int) else {
             modify = true;
-            tracing::info!(?item, "{}", s!("new loot item"));
+            // New model observations are useful while maintaining the loot
+            // database, but this runs during entity scans and can flood the
+            // terminal in a busy area. Keep it out of normal runtime logs.
+            tracing::debug!(?item, "{}", s!("new loot item"));
             continue;
         };
         if !model.contains(&item.model) && !item.model.is_empty() {

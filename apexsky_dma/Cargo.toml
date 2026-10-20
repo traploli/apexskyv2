@@ -25,6 +25,7 @@ hex = { version = "0.4.3", features = ["serde"] }
 include-flate = "0.3.3"
 indexmap = "2.14.0"
 itertools = "0.14.0"
+memflow = "0.2.0"
 named_constants = "0.2.0"
 ndarray = "0.17.2"
 obfstr = "0.4.4"

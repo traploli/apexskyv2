@@ -41,6 +41,45 @@ pub struct AimbotSettings {
     pub looting_smooth: f32,
     pub recoil_smooth_x: f32,
     pub recoil_smooth_y: f32,
+    /// Smoothing mode: 0 SmoothDamp, 1 Linear, 2 Bezier, 3 CubicBezier, 4 S-Curve, 5 Auto.
+    #[serde(default)]
+    pub smoothing_mode: u8,
+    /// Ignore pitch/yaw corrections smaller than these values, in degrees.
+    #[serde(default)]
+    pub dead_zone_pitch: f32,
+    #[serde(default)]
+    pub dead_zone_yaw: f32,
+    /// Projectile tuning multipliers applied to the active weapon values.
+    #[serde(default = "default_one")]
+    pub bullet_speed_multiplier: f32,
+    #[serde(default = "default_one")]
+    pub bullet_gravity_multiplier: f32,
+    #[serde(default = "default_one")]
+    pub aim_offset_multiplier: f32,
+    /// Weapon-specific vertical correction in game units.
+    #[serde(default)]
+    pub bow_adjust: f32,
+    #[serde(default)]
+    pub on_sheila: bool,
+    #[serde(default)]
+    pub hold_sheila: bool,
+    /// Reference triggerbot timing: attack hold and minimum retrigger interval.
+    #[serde(default = "default_trigger_hold_ms")]
+    pub trigger_hold_ms: u64,
+    #[serde(default = "default_trigger_again_ms")]
+    pub trigger_again_ms: u64,
+}
+
+fn default_trigger_hold_ms() -> u64 {
+    60
+}
+
+fn default_trigger_again_ms() -> u64 {
+    80
+}
+
+fn default_one() -> f32 {
+    1.0
 }
 
 impl Default for AimbotSettings {
@@ -69,6 +108,17 @@ impl Default for AimbotSettings {
             looting_smooth: 80.0,
             recoil_smooth_x: 30.0,
             recoil_smooth_y: 30.0,
+            smoothing_mode: 0,
+            dead_zone_pitch: 0.0,
+            dead_zone_yaw: 0.0,
+            bullet_speed_multiplier: 1.0,
+            bullet_gravity_multiplier: 1.0,
+            aim_offset_multiplier: 1.0,
+            bow_adjust: 0.0,
+            on_sheila: false,
+            hold_sheila: false,
+            trigger_hold_ms: 60,
+            trigger_again_ms: 80,
         }
     }
 }
@@ -145,6 +195,7 @@ pub struct Aimbot {
     triggerbot_state: TriggerState,
     triggerbot_trigger_time: u64,
     triggerbot_release_time: u64,
+    triggerbot_again_time: u64,
     quick_looting_state: i32,
     quick_looting_ready: bool,
 }
@@ -175,6 +226,7 @@ impl Default for Aimbot {
             triggerbot_state: TriggerState::Idle,
             triggerbot_trigger_time: 0,
             triggerbot_release_time: 0,
+            triggerbot_again_time: 0,
             quick_looting_state: 0,
             quick_looting_ready: false,
         }
@@ -553,7 +605,7 @@ impl Aimbot {
     /// - If no trigger is needed, the function returns 0.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// let delay = aimbot.calculate_trigger_delay(&aim_angles);
     /// if delay > 0 {
     ///     // Perform the trigger action after the specified delay
@@ -571,12 +623,7 @@ impl Aimbot {
         }
 
         if aim_angles.hitscan {
-            let delay = if self.love_aimentity {
-                60..600
-            } else {
-                20..200
-            };
-            rand::rng().random_range(delay)
+            0
         } else {
             0
         }
@@ -596,16 +643,20 @@ impl Aimbot {
 
     pub fn smooth_aim_angles(&self, aim_angles: &AimAngles, smooth_factor: f32) -> (f32, f32) {
         assert!(aim_angles.valid);
-
-        let smooth = self.get_smooth() / smooth_factor;
-
-        let smoothed = {
-            (
-                aim_angles.view_pitch + aim_angles.delta_pitch / smooth,
-                aim_angles.view_yaw + aim_angles.delta_yaw / smooth,
-            )
-        };
-
+        let factor = smooth_factor.max(f32::EPSILON);
+        let smooth = (self.get_smooth() / factor).max(1.0);
+        let mut pitch = aim_angles.delta_pitch;
+        let mut yaw = aim_angles.delta_yaw;
+        if pitch.abs() <= self.settings.dead_zone_pitch {
+            pitch = 0.0;
+        }
+        if yaw.abs() <= self.settings.dead_zone_yaw {
+            yaw = 0.0;
+        }
+        let smoothed = (
+            aim_angles.view_pitch + pitch / smooth,
+            aim_angles.view_yaw + yaw / smooth,
+        );
         if smoothed.0.is_nan() || smoothed.1.is_nan() {
             tracing::warn!(?aim_angles, ?smoothed);
         }
@@ -681,10 +732,12 @@ impl TriggerBot for Aimbot {
         let trigger_delay = self.calculate_trigger_delay(aim_angles);
         let now_ms = get_unix_timestamp_in_millis();
         let semi_auto = self.is_semi_auto();
+        let target_is_crosshair = aim_entity.as_ref().is_some_and(|ent| ent.is_crosshair_target());
+        let trigger_allowed = target_is_crosshair && now_ms >= self.triggerbot_again_time;
 
         const WEAPON_BOW: i32 = crate::data::WeaponId::Bow.0;
 
-        if trigger_delay > 0 {
+        if trigger_delay > 0 || (trigger_allowed && aim_angles.hitscan) {
             let attack_pressed = force_attack_state == 5;
 
             match self.triggerbot_state {
@@ -714,7 +767,8 @@ impl TriggerBot for Aimbot {
                 TriggerState::Trigger => {
                     if semi_auto {
                         // No continuous triggering for headshot weapons
-                        self.triggerbot_release_time = now_ms + rand::rng().random_range(10..100);
+                        self.triggerbot_release_time = now_ms + self.settings.trigger_hold_ms;
+                        self.triggerbot_again_time = self.triggerbot_release_time + self.settings.trigger_again_ms;
                         self.triggerbot_state = TriggerState::WaitRelease;
                     } else {
                         // Keep triggering the trigger.
@@ -795,15 +849,11 @@ pub fn normalize_delta_angles(angle: &mut [f32; 3]) {
 pub fn calc_angle(src: &[f32; 3], dst: &[f32; 3]) -> [f32; 3] {
     let delta = math::sub(*src, *dst);
     let hyp = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
-    let mut angle = [
-        (delta[2] / hyp).atan().to_degrees(),
-        (delta[1] / delta[0]).atan().to_degrees(),
+    [
+        (delta[2] / hyp.max(f32::EPSILON)).atan().to_degrees(),
+        f32::atan2(delta[1], delta[0]).to_degrees() + 180.0,
         0.0,
-    ];
-    if delta[0] >= 0.0 {
-        angle[1] += 180.0;
-    }
-    angle
+    ]
 }
 
 pub fn calc_fov(view_angle: &[f32; 3], aim_angle: &[f32; 3]) -> f32 {

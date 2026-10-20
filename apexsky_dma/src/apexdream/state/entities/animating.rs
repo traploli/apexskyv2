@@ -61,7 +61,10 @@ impl Entity for AnimatingEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 3],
+            // `entity_origin` now holds `absOriginShadowPtr` (a 64-bit pointer, split as two
+            // gathered dwords), not the origin vector itself — see
+            // `crate::apexdream::base::cr3` for why and how it's dereferenced.
+            origin_shadow_ptr: [u32; 2],
             model_name: [u32; 2],
             owner_entity: u32,
             skin: [u32; 4],
@@ -69,11 +72,7 @@ impl Entity for AnimatingEntity {
 
         let data = &ctx.data;
         let mut indices = Indices {
-            origin: [
-                data.entity_origin,
-                data.entity_origin + 4,
-                data.entity_origin + 8,
-            ],
+            origin_shadow_ptr: [data.entity_origin, data.entity_origin + 4],
             model_name: [data.entity_model_name, data.entity_model_name + 4],
             owner_entity: data.entity_owner_entity,
             skin: [
@@ -88,16 +87,27 @@ impl Entity for AnimatingEntity {
             .vm_gatherd(self.entity_ptr, self.entity_size, true, &mut indices)
             .await
         {
-            let origin = [
-                f32::from_bits(fields.origin[0]),
-                f32::from_bits(fields.origin[1]),
-                f32::from_bits(fields.origin[2]),
-            ];
+            let origin_shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
 
-            if self.origin != origin {
-                self.update_time = ctx.time;
+            // Same primary-DTB-pointer / secondary-DTB-dereference split as `BaseEntity`: on
+            // failure, `self.origin` (and `self.update_time`) are left untouched rather than
+            // overwritten with a zeroed/garbage vector.
+            match crate::apexdream::base::cr3::read_shadow::<[f32; 3]>(
+                api,
+                origin_shadow_ptr,
+                api.apex_base.into_raw(),
+            )
+            .await
+            {
+                Ok(origin) => {
+                    if self.origin != origin {
+                        self.update_time = ctx.time;
+                    }
+                    self.origin = origin;
+                }
+                Err(e) => tracing::trace!(?e, entity_ptr = ?self.entity_ptr, "shadow absOrigin read failed, keeping last-good"),
             }
-            self.origin = origin;
 
             let model_name_ptr =
                 fields.model_name[0] as u64 | ((fields.model_name[1] as u64) << 32);

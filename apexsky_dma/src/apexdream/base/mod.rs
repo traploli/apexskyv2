@@ -15,6 +15,7 @@ macro_rules! hash {
     };
 }
 
+pub mod cr3;
 pub mod math;
 pub mod solver;
 

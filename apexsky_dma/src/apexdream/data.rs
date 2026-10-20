@@ -48,6 +48,10 @@ pub struct GameData {
     pub entity_health: u32,
     pub entity_team_num: u32,
     pub entity_velocity: u32,
+    /// Local-player-only validation dup of `entity_origin`'s shadow pointer target, read under
+    /// the primary DTB. Used by [`crate::apexdream::base::cr3`] to sanity-check a candidate
+    /// secondary DTB by distance before trusting a shadow-origin read through it.
+    pub player_abs_origin_shadow_dup: u32,
     pub entity_owner_entity: u32,
     pub _entity_collision: u32,
     pub _entity_collision_group: u32,
@@ -158,6 +162,10 @@ impl Default for GameData {
             entity_health: G_OFFSETS.player_health.try_into().unwrap(),
             entity_team_num: G_OFFSETS.entity_team_num.try_into().unwrap(),
             entity_velocity: G_OFFSETS.centity_velocity.try_into().unwrap(),
+            player_abs_origin_shadow_dup: G_OFFSETS
+                .player_abs_origin_shadow_dup
+                .try_into()
+                .unwrap(),
             entity_owner_entity: G_OFFSETS.entity_owner_entity.try_into().unwrap(),
             _entity_collision: G_OFFSETS.entity_collision.try_into().unwrap(),
             _entity_collision_group: G_OFFSETS.entity_collision_group.try_into().unwrap(),

@@ -19,6 +19,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 use tracing::{instrument, trace};
 
 use crate::SharedStateType;
+use crate::game::data::WeaponId;
 use crate::actuator::{
     AimActuator, AimbotAction, DeviceAimActuator, KmboxAimActuator, MemAimHelper, QmpAimActuator,
 };
@@ -89,6 +90,7 @@ pub async fn aimbot_loop(
     let mut prev_recoil_angle: [f32; 3] = [0.0, 0.0, 0.0];
     let mut prev_view_angles: Option<[f32; 3]> = None;
     let mut prev_aim_target_id: u64 = 0;
+    let mut smooth_velocity = [0.0_f32, 0.0_f32];
     let mut mem_aim_helper = MemAimHelper {
         mem: access_tx.clone(),
         apex_base: 0,
@@ -312,10 +314,22 @@ pub async fn aimbot_loop(
         let mut shift_angles: Option<[f32; 3]> = None;
 
         // Aim Assist
+        if aim_entity_ptr != prev_aim_target_id {
+            smooth_velocity = [0.0, 0.0];
+            prev_aim_target_id = aim_entity_ptr;
+        }
         if aimbot.is_aiming() && aim_result.valid {
             let view_angles = [aim_result.view_pitch, aim_result.view_yaw, 0.0];
             let smoothed_angles =
-                smooth_aim_angles_ext(&smoother, &aimbot, &aim_result, smooth_factor).await?;
+                smooth_aim_angles_ext(
+                    &smoother,
+                    &aimbot,
+                    &aim_result,
+                    smooth_factor,
+                    &mut smooth_velocity,
+                    loop_duration.as_secs_f32(),
+                )
+                .await?;
             let smoothed_angles = [smoothed_angles.0, smoothed_angles.1, 0.0];
             let smoothed_delta_angles = math::sub(smoothed_angles, view_angles);
 
@@ -653,12 +667,19 @@ impl BestAim for Aimbot {
                     if weapon_info.bullet_speed > 1.0 {
                         let distance_to_target =
                             math::dist(target_bone_position, local_view_position);
-                        let time_to_target = distance_to_target / weapon_info.bullet_speed;
-                        let target_pos_ahead = math::add(
+                        let time_to_target = distance_to_target
+                            / (weapon_info.bullet_speed
+                                * aimbot_settings.bullet_speed_multiplier.max(f32::EPSILON));
+                        let mut target_pos_ahead = math::add(
                             target_bone_position,
-                            math::muls(target_vel, time_to_target * 0.5),
+                            math::muls(
+                                target_vel,
+                                time_to_target * aimbot_settings.aim_offset_multiplier,
+                            ),
                         );
-                        // let target_pos_ahead = target_bone_position;
+                        if WeaponId(weapon_info.weapon_id) == WeaponId::Bow {
+                            target_pos_ahead[2] += aimbot_settings.bow_adjust;
+                        }
 
                         aim_target = target_pos_ahead;
 
@@ -667,6 +688,9 @@ impl BestAim for Aimbot {
                             local_view_position,
                             target_pos_ahead,
                             target_vel,
+                            aimbot_settings.bullet_speed_multiplier,
+                            aimbot_settings.bullet_gravity_multiplier,
+                            aimbot_settings.aim_offset_multiplier,
                         );
                     }
 
@@ -1015,6 +1039,9 @@ fn linear_predict(
     pos_origin: [f32; 3],
     pos_target: [f32; 3],
     vel_target: [f32; 3],
+    speed_multiplier: f32,
+    gravity_multiplier: f32,
+    offset_multiplier: f32,
 ) -> Option<(f32, f32)> {
     use crate::apexdream::base::solver::{Collection, LinearPredictor, ProjectileWeapon, solve};
     use crate::apexdream::sdk::projectiles;
@@ -1053,15 +1080,18 @@ fn linear_predict(
         }
     }
 
+    let speed_multiplier = speed_multiplier.max(f32::EPSILON);
+    let gravity_multiplier = gravity_multiplier.max(0.0);
+    let offset_multiplier = offset_multiplier.max(0.0);
     let weapon = Weapon(
-        weapon_info.bullet_speed,
-        weapon_info.bullet_gravity,
+        weapon_info.bullet_speed * speed_multiplier,
+        weapon_info.bullet_gravity * gravity_multiplier,
         projectile,
     );
 
     let predictor = LinearPredictor {
         origin: pos_target,
-        velocity: vel_target,
+        velocity: math::muls(vel_target, offset_multiplier),
     };
 
     if let Some(sol) = solve(&pos_origin, &weapon, &predictor) {
@@ -1087,20 +1117,68 @@ async fn smooth_aim_angles_ext(
     aimbot: &Aimbot,
     aim_angles: &AimAngles,
     smooth_factor: f32,
+    velocity: &mut [f32; 2],
+    delta_time: f32,
 ) -> anyhow::Result<(f32, f32)> {
     assert!(aim_angles.valid);
 
-    let smooth = aimbot.get_smooth() / smooth_factor;
+    let factor = smooth_factor.max(f32::EPSILON);
+    let settings = aimbot.get_settings();
+    let mut pitch_delta = aim_angles.delta_pitch;
+    let mut yaw_delta = aim_angles.delta_yaw;
+    if pitch_delta.abs() <= settings.dead_zone_pitch {
+        pitch_delta = 0.0;
+    }
+    if yaw_delta.abs() <= settings.dead_zone_yaw {
+        yaw_delta = 0.0;
+    }
+    let smooth = (aimbot.get_smooth() / factor).max(1.0);
 
-    let smoothed = {
+    let smoothed = if settings.smoothing_mode == 0 {
+        let dt = delta_time.clamp(0.0001, 0.05);
+        let smooth_time = (aimbot.get_smooth() / 100.0).max(0.001);
+        let damp = |current: f32, target: f32, velocity: &mut f32| {
+            let omega = 2.0 / smooth_time;
+            let x = omega * dt;
+            let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+            let change = current - target;
+            let temp = (*velocity + omega * change) * dt;
+            *velocity = (*velocity - omega * temp) * exp;
+            target + (change + temp) * exp
+        };
+        if aimbot.get_aim_entity() != 0 {
+            let pitch = damp(aim_angles.view_pitch, aim_angles.view_pitch + pitch_delta, &mut velocity[0]);
+            let yaw = damp(aim_angles.view_yaw, aim_angles.view_yaw + yaw_delta, &mut velocity[1]);
+            (pitch, yaw)
+        } else {
+            (aim_angles.view_pitch, aim_angles.view_yaw)
+        }
+    } else if settings.smoothing_mode == 0 {
         let args = AimbotSmoothArgs {
             target: aimbot.get_aim_entity(),
             current: (aim_angles.view_pitch, aim_angles.view_yaw),
-            delta: (aim_angles.delta_pitch, aim_angles.delta_yaw),
+            delta: (pitch_delta, yaw_delta),
             smooth: (smooth, smooth),
         };
         let ret = smoother.call(RkyvValue::from_value(args)?).await?;
         ret.into_value()?
+    } else {
+        let t = (1.0 / smooth).clamp(0.0, 1.0);
+        let mode = if settings.smoothing_mode == 5 {
+            if aim_angles.delta_pitch.abs() + aim_angles.delta_yaw.abs() > 20.0 { 1 } else { 4 }
+        } else {
+            settings.smoothing_mode
+        };
+        let u = match mode {
+            2 => t * t,
+            3 => t * t * (3.0 - 2.0 * t),
+            4 => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
+            _ => t,
+        };
+        (
+            aim_angles.view_pitch + pitch_delta * u,
+            aim_angles.view_yaw + yaw_delta * u,
+        )
     };
 
     if smoothed.0.is_nan() || smoothed.1.is_nan() {
