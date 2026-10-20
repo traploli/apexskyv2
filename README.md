@@ -61,14 +61,42 @@ packages in one directory, launch as a normal user:
 Do not use `sudo`; the runtime and overlay reject root execution, and root
 launches can create root-owned runtime files.
 
-## Compatibility
+## CR3 handling and Windows 10 20H1 reference
+
+The CR3/shadow-origin path includes cached secondary-DTB resolution, PE-header
+validation, distance-based validation for local-player duplicate origins, and
+explicit DTB-scoped reads. The implementation is intended to avoid treating a
+stale or invalid CR3 as valid; it does not blindly rotate page-table roots.
+
+Windows 10 version 2004 (20H1) is a reference environment for compatibility
+work, not a guarantee that every Windows 10 20H1 build exposes identical
+kernel or game memory behavior. Validate the exact build, hypervisor, memory
+connector, and target module before enabling direct DTB reads. Keep
+`use_memflow_direct = false` unless the configured connector has been tested
+with the target VM and its DTB acquisition path.
+
+Reference media:
+
+```text
+https://archive.org/details/win-10-2004-english-x-64_202010
+```
+
+This link identifies the Windows 10 2004 x64 reference media. It is not a
+source of offsets or a substitute for validating the running system. Do not
+publish or redistribute Microsoft installation media through this repository.
+
+For a Windows 10 20H1 compatibility test, record the exact OS build, kernel
+CR3 source, connector type, module base, validation result, and whether the
+shadow-origin distance check remains within its configured bound. Report a
+failed validation and retain the last known-good DTB rather than forcing a
+new CR3.
+
+## License
 
 The checked-in native profile and generated packages are intended for the
 matching x86_64 Linux runtime and current game build. A separate target build
 is required for Windows. Offsets are loaded at startup; rebuild and restart
 after an update.
-
-## License
 
 No license has been declared yet. Add an appropriate `LICENSE` file before
 publishing a public repository if the source is intended for redistribution.
