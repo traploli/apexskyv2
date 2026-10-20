@@ -91,7 +91,29 @@ shadow-origin distance check remains within its configured bound. Report a
 failed validation and retain the last known-good DTB rather than forcing a
 new CR3.
 
+### Version support: KB4598291
+
+KB4598291 is supported as a Windows 10 version 2004/20H1 reference update for
+x64 compatibility testing. Microsoft Update Catalog identifies it as the
+2021-01 cumulative update preview for Windows 10 Version 2004 x64, published
+February 2, 2021. The same KB also has separate 20H2, x86, ARM64, and Server
+packages; those packages are not interchangeable with the Windows 10 2004
+x64 reference environment.
+
+Update Catalog:
+
+```text
+https://www.catalog.update.microsoft.com/Search.aspx?q=kb4598291
+```
+
+Record the installed OS build and architecture alongside the KB number. The
+KB alone is not sufficient to identify the kernel revision or guarantee CR3,
+DTB, offset, or connector compatibility. Revalidate PE headers, secondary-DTB
+resolution, and the local-player shadow-origin distance check after installing
+or changing the update.
+
 ## License
+
 
 The checked-in native profile and generated packages are intended for the
 matching x86_64 Linux runtime and current game build. A separate target build
