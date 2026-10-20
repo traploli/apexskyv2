@@ -112,6 +112,7 @@ impl ContextForAimbot for SharedStateType {
 
         let mut weapon_info = apex1_common::aimbot::CurrentWeaponInfo::default();
         weapon_info.weapon_id = weapon.weapon_name_index;
+        weapon_info.weapon_name = weapon.weapon_name.0;
         weapon_info.bullet_speed = weapon.projectile_speed();
         weapon_info.bullet_gravity = weapon.projectile_gravity();
         weapon_info.weapon_zoom_fov = weapon.cur_zoom_fov;

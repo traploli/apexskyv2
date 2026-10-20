@@ -26,6 +26,10 @@ pub struct AimbotSettings {
     pub ads_fov: f32,
     pub non_ads_fov: f32,
     pub triggerbot_fov: f32,
+    /// Triggerbot target selection: -1 origin + 60, 0..100 static hitbox,
+    /// 101 near3, 102 near6, 103 near12, 104 all hitboxes.
+    #[serde(default = "default_triggerbot_hitbox")]
+    pub triggerbot_hitbox: i32,
     pub auto_nade_aim: bool,
     pub no_recoil: bool,
     pub bone: i32,
@@ -59,6 +63,9 @@ pub struct AimbotSettings {
     /// Weapon-specific vertical correction in game units.
     #[serde(default)]
     pub bow_adjust: f32,
+    /// Explicit vertical correction for Sheila targets, in game units.
+    #[serde(default)]
+    pub sheila_adjust: f32,
     #[serde(default)]
     pub on_sheila: bool,
     #[serde(default)]
@@ -78,6 +85,10 @@ fn default_trigger_again_ms() -> u64 {
     80
 }
 
+fn default_triggerbot_hitbox() -> i32 {
+    0
+}
+
 fn default_one() -> f32 {
     1.0
 }
@@ -93,6 +104,7 @@ impl Default for AimbotSettings {
             ads_fov: 12.0,
             non_ads_fov: 50.0,
             triggerbot_fov: 60.0,
+            triggerbot_hitbox: 0,
             auto_nade_aim: true,
             no_recoil: false,
             bone: 2,
@@ -115,6 +127,7 @@ impl Default for AimbotSettings {
             bullet_gravity_multiplier: 1.0,
             aim_offset_multiplier: 1.0,
             bow_adjust: 0.0,
+            sheila_adjust: 0.0,
             on_sheila: false,
             hold_sheila: false,
             trigger_hold_ms: 60,
@@ -159,6 +172,9 @@ enum TriggerState {
 )]
 pub struct CurrentWeaponInfo {
     pub weapon_id: i32,
+    /// Hash/name supplied by the weapon entity; avoids guessing a weapon offset or ID.
+    #[serde(default)]
+    pub weapon_name: u32,
     pub bullet_speed: f32,
     pub bullet_gravity: f32,
     pub weapon_zoom_fov: f32,
@@ -239,6 +255,7 @@ pub trait TriggerBot {
     fn poll_looting_action(&mut self) -> i32;
     fn triggerbot_update(
         &mut self,
+        local_entity: Option<Arc<dyn AimEntity>>,
         aim_entity: Option<Arc<dyn AimEntity>>,
         aim_angles: &AimAngles,
         force_attack_state: i32,
@@ -385,6 +402,10 @@ impl Aimbot {
     #[tracing::instrument]
     pub fn update_attack_state(&mut self, attack_state: i32) {
         self.attack_state = attack_state;
+    }
+
+    pub fn get_attack_state(&self) -> i32 {
+        self.attack_state
     }
 
     pub fn get_zoom_state(&self) -> i32 {
@@ -664,6 +685,36 @@ impl Aimbot {
     }
 }
 
+impl Aimbot {
+    fn triggerbot_hitbox_matches(
+        &self,
+        local_entity: &dyn AimEntity,
+        entity: &dyn AimEntity,
+    ) -> bool {
+        let view = local_entity.get_view_angles();
+        let camera = local_entity.get_cam_pos();
+        let mut positions = Vec::new();
+        match self.settings.triggerbot_hitbox {
+            -1 => {
+                let mut position = entity.get_position();
+                position[2] += 60.0;
+                positions.push(position);
+            }
+            0..=100 => positions.push(entity.get_bone_position_by_hitbox(self.settings.triggerbot_hitbox as u32)),
+            101 => positions.extend([0, 1, 2].into_iter().map(|id| entity.get_bone_position_by_hitbox(id))),
+            102 => positions.extend([0, 1, 2, 3, 4, 11].into_iter().map(|id| entity.get_bone_position_by_hitbox(id))),
+            103 => positions.extend([0, 1, 2, 3, 4, 5, 8, 11, 12, 14, 15, 6].into_iter().map(|id| entity.get_bone_position_by_hitbox(id))),
+            104 => positions.extend((0..17).map(|id| entity.get_bone_position_by_hitbox(id))),
+            _ => return false,
+        }
+        positions.into_iter().any(|position| {
+            position != [0.0; 3]
+                && position.iter().all(|value| value.is_finite())
+                && calc_fov(&view, &calc_angle(&camera, &position)) <= self.settings.triggerbot_fov
+        })
+    }
+}
+
 impl TriggerBot for Aimbot {
     #[tracing::instrument]
     fn is_triggerbot_ready(&self) -> bool {
@@ -725,6 +776,7 @@ impl TriggerBot for Aimbot {
     #[tracing::instrument]
     fn triggerbot_update(
         &mut self,
+        local_entity: Option<Arc<dyn AimEntity>>,
         aim_entity: Option<Arc<dyn AimEntity>>,
         aim_angles: &AimAngles,
         force_attack_state: i32,
@@ -735,6 +787,12 @@ impl TriggerBot for Aimbot {
         let target_is_crosshair = aim_entity.as_ref().is_some_and(|ent| ent.is_crosshair_target());
         let trigger_allowed = self.triggerbot_ready
             && target_is_crosshair
+            && aim_entity
+                .as_ref()
+                .zip(local_entity.as_ref())
+                .is_some_and(|(entity, local)| {
+                    self.triggerbot_hitbox_matches(local.as_ref(), entity.as_ref())
+                })
             && now_ms >= self.triggerbot_again_time;
 
         // Do not leave a pending press armed after the triggerbot hotkey is

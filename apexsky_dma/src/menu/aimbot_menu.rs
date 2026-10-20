@@ -530,8 +530,23 @@ pub(super) fn build_aimbot_menu(
                 None
             },
         )
+        .add_input_item(
+            menu_fmt.format_item(
+                "27 - Sheila vertical adjustment".to_string(),
+                Span::from(format!("{:.2}", settings.aimbot_settings.sheila_adjust)),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<f32>() && (-200.0..=200.0).contains(&value) {
+                    lock_config!().settings.aimbot_settings.sheila_adjust = value;
+                    return None;
+                }
+                Some("Sheila adjustment must be between -200 and 200".to_string())
+            },
+            (),
+        )
         .add_toggle_item(
-            "27 - Sheila adjustment enabled",
+            "28 - Sheila adjustment enabled",
             settings.aimbot_settings.on_sheila,
             |_ctx, _| {
                 let settings = &mut lock_config!().settings.aimbot_settings;
@@ -541,7 +556,7 @@ pub(super) fn build_aimbot_menu(
         )
         .add_input_item(
             menu_fmt.format_item(
-                "29 - Trigger hold (ms)".to_string(),
+                "30 - Trigger hold (ms)".to_string(),
                 Span::from(settings.aimbot_settings.trigger_hold_ms.to_string()),
             ),
             &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
@@ -569,8 +584,25 @@ pub(super) fn build_aimbot_menu(
             },
             (),
         )
+        .add_input_item(
+            menu_fmt.format_item(
+                "31 - Triggerbot hitbox (-1 origin+60, 0..100 bone, 101/102/103/104 multi)".to_string(),
+                Span::from(settings.aimbot_settings.triggerbot_hitbox.to_string()),
+            ),
+            &i18n_msg!(&menu_fmt, InputPromptSmoothValue),
+            |_ctx, val, _| {
+                if let Ok(value) = val.trim().parse::<i32>()
+                    && (-1..=104).contains(&value)
+                {
+                    lock_config!().settings.aimbot_settings.triggerbot_hitbox = value;
+                    return None;
+                }
+                Some("triggerbot hitbox must be -1, 0..100, or 101..104".to_string())
+            },
+            (),
+        )
         .add_toggle_item(
-            "28 - Hold Sheila",
+            "32 - Hold Sheila",
             settings.aimbot_settings.hold_sheila,
             |_ctx, _| {
                 let settings = &mut lock_config!().settings.aimbot_settings;

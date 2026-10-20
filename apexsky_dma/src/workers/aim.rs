@@ -304,7 +304,12 @@ pub async fn aimbot_loop(
         // Update Trigger Bot state
         // Ensure that the triggerbot is updated,
         // otherwise there may be issues with not canceling after firing.
-        aimbot.triggerbot_update(target_entity, &aim_result, aim_key_rx.borrow().attack_state);
+        aimbot.triggerbot_update(
+            Some(local_entity.clone()),
+            target_entity,
+            &aim_result,
+            aim_key_rx.borrow().attack_state,
+        );
         if aiming {
             tracing::debug!("711aac39-e83c-4788 trigger updated");
         }
@@ -679,6 +684,20 @@ impl BestAim for Aimbot {
                         );
                         if WeaponId(weapon_info.weapon_id) == WeaponId::Bow {
                             target_pos_ahead[2] += aimbot_settings.bow_adjust;
+                        }
+                        // Sheila is identified from the live weapon entity name, not a guessed
+                        // weapon index. HoldSheila applies only while the attack input is held;
+                        // OnSheila applies whenever the mounted weapon is active.
+                        const SHEILA_MOUNTED: u32 =
+                            crate::apexdream::base::hash("mp_weapon_mounted_turret_weapon");
+                        const SHEILA_UNMOUNTED: u32 =
+                            crate::apexdream::base::hash("mp_weapon_mobile_hmg");
+                        let sheila_active = weapon_info.weapon_name == SHEILA_MOUNTED
+                            || weapon_info.weapon_name == SHEILA_UNMOUNTED;
+                        let sheila_enabled = aimbot_settings.on_sheila
+                            && (!aimbot_settings.hold_sheila || self.get_attack_state() == 5);
+                        if sheila_active && sheila_enabled {
+                            target_pos_ahead[2] += aimbot_settings.sheila_adjust;
                         }
 
                         aim_target = target_pos_ahead;

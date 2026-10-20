@@ -18,6 +18,7 @@ include-flate = "0.3.3"
 indexmap = { version = "2.14.0", features = ["serde"] }
 named_constants = "0.2.0"
 obfstr = "0.4.4"
+# The SDK is external to this repository; vendor/ohosky_api tracks the dmalib trait snapshot.
 ohosky_api = { path = "../../ohosky_sdk/ohosky_api", default-features = false }
 parking_lot = { version = "0.12.5", features = ["nightly"] }
 prost = "0.14.3"
