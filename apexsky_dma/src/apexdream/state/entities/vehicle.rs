@@ -51,17 +51,19 @@ impl Entity for VehicleEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 6],
+            origin_shadow_ptr: [u32; 2],
+            angles: [u32; 3],
             driver: u32,
             vehicle_velocity: [u32; 3],
         }
 
         let data = &ctx.data;
         let mut indices = Indices {
-            origin: [
+            origin_shadow_ptr: [
                 data.entity_origin,
                 data.entity_origin + 4,
-                data.entity_origin + 8,
+            ],
+            angles: [
                 data.entity_origin + 24,
                 data.entity_origin + 28,
                 data.entity_origin + 32,
@@ -83,15 +85,17 @@ impl Entity for VehicleEntity {
             .await
         {
             let last_origin = self.origin;
-            self.origin[0] = f32::from_bits(fields.origin[0]);
-            self.origin[1] = f32::from_bits(fields.origin[1]);
-            self.origin[2] = f32::from_bits(fields.origin[2]);
-            if self.origin != last_origin {
-                self.update_time = ctx.time;
+            let shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
+            if let Ok(origin) = crate::apexdream::base::cr3::read_shadow_origin(
+                api, shadow_ptr, api.apex_base.into_raw(),
+            ).await {
+                self.origin = origin;
+                if self.origin != last_origin { self.update_time = ctx.time; }
             }
-            self.angles[0] = f32::from_bits(fields.origin[3]);
-            self.angles[1] = f32::from_bits(fields.origin[4]);
-            self.angles[2] = f32::from_bits(fields.origin[5]);
+            self.angles[0] = f32::from_bits(fields.angles[0]);
+            self.angles[1] = f32::from_bits(fields.angles[1]);
+            self.angles[2] = f32::from_bits(fields.angles[2]);
             self.vehicle_driver = sdk::EHandle::from(fields.driver);
             self.vehicle_velocity[0] = f32::from_bits(fields.vehicle_velocity[0]);
             self.vehicle_velocity[1] = f32::from_bits(fields.vehicle_velocity[1]);

@@ -94,7 +94,8 @@ impl Entity for BaseNPCEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 6],
+            origin_shadow_ptr: [u32; 2],
+            angles: [u32; 3],
             health: [u32; 4],
             team: [u32; 1],
             model_name: [u32; 2],
@@ -107,10 +108,11 @@ impl Entity for BaseNPCEntity {
 
         let data = &ctx.data;
         let mut indices = Indices {
-            origin: [
+            origin_shadow_ptr: [
                 data.entity_origin,
                 data.entity_origin + 4,
-                data.entity_origin + 8,
+            ],
+            angles: [
                 data.entity_origin + 24,
                 data.entity_origin + 28,
                 data.entity_origin + 32,
@@ -153,19 +155,20 @@ impl Entity for BaseNPCEntity {
             .vm_gatherd(self.entity_ptr, self.entity_size, true, &mut indices)
             .await
         {
-            self.origin = [
-                f32::from_bits(fields.origin[0]),
-                f32::from_bits(fields.origin[1]),
-                f32::from_bits(fields.origin[2]),
-            ];
-            if self.origin[0].is_nan() || self.origin[1].is_nan() || self.origin[2].is_nan() {
-                tracing::warn!(?self.origin);
+            let shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
+            if let Ok(origin) = crate::apexdream::base::cr3::read_shadow_origin(
+                api, shadow_ptr, api.apex_base.into_raw(),
+            ).await {
+                self.origin = origin;
+            } else {
+                tracing::trace!("shadow absOrigin read failed, keeping last-good");
             }
 
             self.angles = [
-                f32::from_bits(fields.origin[3]),
-                f32::from_bits(fields.origin[4]),
-                f32::from_bits(fields.origin[5]),
+                f32::from_bits(fields.angles[0]),
+                f32::from_bits(fields.angles[1]),
+                f32::from_bits(fields.angles[2]),
             ];
             if self.angles[0].is_nan() || self.angles[1].is_nan() || self.angles[2].is_nan() {
                 tracing::warn!(?self.angles);

@@ -58,7 +58,7 @@ impl Entity for ProjectileEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 3],
+            origin_shadow_ptr: [u32; 2],
             velocity: [u32; 3],
             team_num: u32,
             owner_entity: u32,
@@ -68,10 +68,9 @@ impl Entity for ProjectileEntity {
         let data = &ctx.data;
         #[allow(clippy::identity_op)]
         let mut indices = Indices {
-            origin: [
+            origin_shadow_ptr: [
                 data.entity_origin,
                 data.entity_origin + 4,
-                data.entity_origin + 8,
             ],
             velocity: [
                 data.entity_velocity,
@@ -102,9 +101,13 @@ impl Entity for ProjectileEntity {
             .vm_gatherd(self.entity_ptr, self.entity_size, true, &mut indices)
             .await
         {
-            self.origin[0] = f32::from_bits(fields.origin[0]);
-            self.origin[1] = f32::from_bits(fields.origin[1]);
-            self.origin[2] = f32::from_bits(fields.origin[2]);
+            let shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
+            if let Ok(origin) = crate::apexdream::base::cr3::read_shadow_origin(
+                api, shadow_ptr, api.apex_base.into_raw(),
+            ).await {
+                self.origin = origin;
+            }
             self.velocity[0] = f32::from_bits(fields.velocity[0]);
             self.velocity[1] = f32::from_bits(fields.velocity[1]);
             self.velocity[2] = f32::from_bits(fields.velocity[2]);

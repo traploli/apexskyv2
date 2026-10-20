@@ -733,7 +733,19 @@ impl TriggerBot for Aimbot {
         let now_ms = get_unix_timestamp_in_millis();
         let semi_auto = self.is_semi_auto();
         let target_is_crosshair = aim_entity.as_ref().is_some_and(|ent| ent.is_crosshair_target());
-        let trigger_allowed = target_is_crosshair && now_ms >= self.triggerbot_again_time;
+        let trigger_allowed = self.triggerbot_ready
+            && target_is_crosshair
+            && now_ms >= self.triggerbot_again_time;
+
+        // Do not leave a pending press armed after the triggerbot hotkey is
+        // released.  A completed press still falls through to its release
+        // state so the actuator cannot be left holding attack.
+        if !self.triggerbot_ready
+            && !self.quick_looting_ready
+            && matches!(self.triggerbot_state, TriggerState::WaitTrigger)
+        {
+            self.triggerbot_state = TriggerState::Idle;
+        }
 
         const WEAPON_BOW: i32 = crate::data::WeaponId::Bow.0;
 

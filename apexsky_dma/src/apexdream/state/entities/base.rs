@@ -77,7 +77,7 @@ impl Entity for BaseEntity {
             // writing a zeroed/garbage vector.
             match api.vm_read::<u64>(entity_ptr.field(data.entity_origin)).await {
                 Ok(shadow_ptr) => {
-                    match crate::apexdream::base::cr3::read_shadow::<[f32; 3]>(
+                    match crate::apexdream::base::cr3::read_shadow_origin(
                         api,
                         shadow_ptr,
                         api.apex_base.into_raw(),

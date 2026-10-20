@@ -93,7 +93,7 @@ impl Entity for AnimatingEntity {
             // Same primary-DTB-pointer / secondary-DTB-dereference split as `BaseEntity`: on
             // failure, `self.origin` (and `self.update_time`) are left untouched rather than
             // overwritten with a zeroed/garbage vector.
-            match crate::apexdream::base::cr3::read_shadow::<[f32; 3]>(
+            match crate::apexdream::base::cr3::read_shadow_origin(
                 api,
                 origin_shadow_ptr,
                 api.apex_base.into_raw(),

@@ -52,7 +52,7 @@ impl Entity for WaypointEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 3],
+            origin_shadow_ptr: [u32; 2],
             network_flags: u32,
             visibility_flags: u32,
             team_num: [u32; 2],
@@ -62,10 +62,9 @@ impl Entity for WaypointEntity {
 
         let data = &ctx.data;
         let mut indices = Indices {
-            origin: [
+            origin_shadow_ptr: [
                 data.entity_origin,
                 data.entity_origin + 4,
-                data.entity_origin + 8,
             ],
             network_flags: 0x02d8, //0x03d4,
             visibility_flags: data.entity_team_num - 8,
@@ -78,9 +77,13 @@ impl Entity for WaypointEntity {
             .vm_gatherd(self.entity_ptr, self.entity_size, true, &mut indices)
             .await
         {
-            self.origin[0] = f32::from_bits(fields.origin[0]);
-            self.origin[1] = f32::from_bits(fields.origin[1]);
-            self.origin[2] = f32::from_bits(fields.origin[2]);
+            let shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
+            if let Ok(origin) = crate::apexdream::base::cr3::read_shadow_origin(
+                api, shadow_ptr, api.apex_base.into_raw(),
+            ).await {
+                self.origin = origin;
+            }
             self.network_flags = fields.network_flags;
             self.visibility_flags = fields.visibility_flags;
             self.team_num = fields.team_num[0] as i32;

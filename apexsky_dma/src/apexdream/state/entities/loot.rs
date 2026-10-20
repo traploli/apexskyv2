@@ -64,7 +64,7 @@ impl Entity for LootEntity {
         #[derive(sdk::FromBytes, sdk::IntoBytes)]
         #[repr(C)]
         struct Indices {
-            origin: [u32; 3],
+            origin_shadow_ptr: [u32; 2],
             model_name: [u32; 2],
             skin: [u32; 4],
             // highlight: [u32; 4],
@@ -73,10 +73,9 @@ impl Entity for LootEntity {
 
         let data = &ctx.data;
         let mut indices = Indices {
-            origin: [
+            origin_shadow_ptr: [
                 data.entity_origin,
                 data.entity_origin + 4,
-                data.entity_origin + 8,
             ],
             model_name: [data.entity_model_name, data.entity_model_name + 4],
             skin: [
@@ -103,15 +102,14 @@ impl Entity for LootEntity {
             .vm_gatherd(self.entity_ptr, self.entity_size, true, &mut indices)
             .await
         {
-            let origin = [
-                f32::from_bits(fields.origin[0]),
-                f32::from_bits(fields.origin[1]),
-                f32::from_bits(fields.origin[2]),
-            ];
-            if self.origin != origin {
-                self.update_time = ctx.time;
+            let shadow_ptr = fields.origin_shadow_ptr[0] as u64
+                | ((fields.origin_shadow_ptr[1] as u64) << 32);
+            if let Ok(origin) = crate::apexdream::base::cr3::read_shadow_origin(
+                api, shadow_ptr, api.apex_base.into_raw(),
+            ).await {
+                if self.origin != origin { self.update_time = ctx.time; }
+                self.origin = origin;
             }
-            self.origin = origin;
 
             let model_name_ptr =
                 fields.model_name[0] as u64 | ((fields.model_name[1] as u64) << 32);

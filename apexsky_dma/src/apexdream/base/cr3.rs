@@ -88,7 +88,10 @@ mod memflow_backend {
             Inventory::scan()
         } else {
             Inventory::scan_path(dir).map_err(|e| {
-                anyhow::anyhow!("memflow Inventory::scan_path({dir:?}) failed: {}", e.as_str())
+                anyhow::anyhow!(
+                    "memflow Inventory::scan_path({dir:?}) failed: {}",
+                    e.as_str()
+                )
             })?
         };
 
@@ -255,15 +258,23 @@ async fn validate_dtb_by_pe_header(api: &Api, dtb: u64, module_base: u64) -> boo
         return false;
     }
 
-    let Ok(e_lfanew) = dtb_read::<u32>(api, dtb, module_base + 0x3C).await else {
+    let Some(e_lfanew_addr) = module_base.checked_add(0x3C) else {
+        return false;
+    };
+    let Ok(e_lfanew) = dtb_read::<u32>(api, dtb, e_lfanew_addr).await else {
         return false;
     };
     if e_lfanew == 0 || e_lfanew > MAX_E_LFANEW {
         return false;
     }
 
-    let Ok(image_base) = dtb_read::<u64>(api, dtb, module_base + e_lfanew as u64 + 0x30).await
+    let Some(image_base_addr) = module_base
+        .checked_add(e_lfanew as u64)
+        .and_then(|addr| addr.checked_add(0x30))
     else {
+        return false;
+    };
+    let Ok(image_base) = dtb_read::<u64>(api, dtb, image_base_addr).await else {
         return false;
     };
     image_base == module_base
@@ -273,11 +284,37 @@ async fn validate_dtb_by_pe_header(api: &Api, dtb: u64, module_base: u64) -> boo
 /// e.g. the local player's own `player_abs_origin_shadow_dup` or camera position, which can
 /// legitimately differ from the shadow copy by up to a tick of movement. Never compare these
 /// for exact equality.
+pub fn validate_vec3(value: [f32; 3]) -> anyhow::Result<[f32; 3]> {
+    if value.iter().all(|component| component.is_finite()) {
+        Ok(value)
+    } else {
+        anyhow::bail!("non-finite shadow origin: {value:?}")
+    }
+}
+
 pub fn validate_by_distance(candidate: [f32; 3], reference: [f32; 3], max_dist: f32) -> bool {
+    if !max_dist.is_finite() || max_dist < 0.0 {
+        return false;
+    }
+    let Ok(candidate) = validate_vec3(candidate) else {
+        return false;
+    };
+    let Ok(reference) = validate_vec3(reference) else {
+        return false;
+    };
     let dx = candidate[0] - reference[0];
     let dy = candidate[1] - reference[1];
     let dz = candidate[2] - reference[2];
-    (dx * dx + dy * dy + dz * dz) <= max_dist * max_dist
+    (dx * dx + dy * dy + dz * dz).is_finite() && (dx * dx + dy * dy + dz * dz) <= max_dist * max_dist
+}
+
+/// Read an absOrigin shadow pointer and reject malformed vectors before callers publish them.
+pub async fn read_shadow_origin(
+    api: &Api,
+    shadow_ptr_addr: u64,
+    module_base: u64,
+) -> anyhow::Result<[f32; 3]> {
+    validate_vec3(read_shadow::<[f32; 3]>(api, shadow_ptr_addr, module_base).await?)
 }
 
 /// Resolves a secondary DTB that currently validates against `module_base`'s PE header, or
@@ -371,6 +408,14 @@ mod tests {
             parse_cr3_from_hmp_registers("CR3=0000000000000000"),
             Some(0),
         );
+    }
+
+    #[test]
+    fn rejects_non_finite_vectors_and_distance_inputs() {
+        assert!(validate_vec3([1.0, 2.0, 3.0]).is_ok());
+        assert!(validate_vec3([f32::NAN, 2.0, 3.0]).is_err());
+        assert!(!validate_by_distance([1.0, 2.0, 3.0], [1.0, f32::INFINITY, 3.0], 8.0));
+        assert!(!validate_by_distance([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], f32::NAN));
     }
 
     #[test]

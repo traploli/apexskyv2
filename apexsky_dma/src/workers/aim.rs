@@ -1112,6 +1112,36 @@ struct AimbotSmoothArgs {
     smooth: (f32, f32),
 }
 
+fn smooth_damp(
+    current: f32,
+    target: f32,
+    velocity: &mut f32,
+    smooth_time: f32,
+    delta_time: f32,
+    max_speed: f32,
+) -> f32 {
+    let smooth_time = smooth_time.max(0.0001);
+    let delta_time = delta_time.max(0.0);
+    let omega = 2.0 / smooth_time;
+    let x = omega * delta_time;
+    let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+    let original_target = target;
+    let change = (current - target).clamp(-max_speed.max(0.0) * smooth_time, max_speed.max(0.0) * smooth_time);
+    let target = current - change;
+    let temp = (*velocity + omega * change) * delta_time;
+    *velocity = (*velocity - omega * temp) * exp;
+    let mut output = target + (change + temp) * exp;
+    if (original_target - current > 0.0) == (output > original_target) {
+        output = original_target;
+        if delta_time > 0.0 {
+            *velocity = (output - original_target) / delta_time;
+        } else {
+            *velocity = 0.0;
+        }
+    }
+    output
+}
+
 async fn smooth_aim_angles_ext(
     smoother: &SharedRpcClient<RkyvValue<AimbotSmoothArgs>, RkyvValue<(f32, f32)>>,
     aimbot: &Aimbot,
@@ -1124,36 +1154,25 @@ async fn smooth_aim_angles_ext(
 
     let factor = smooth_factor.max(f32::EPSILON);
     let settings = aimbot.get_settings();
-    let mut pitch_delta = aim_angles.delta_pitch;
-    let mut yaw_delta = aim_angles.delta_yaw;
-    if pitch_delta.abs() <= settings.dead_zone_pitch {
-        pitch_delta = 0.0;
-    }
-    if yaw_delta.abs() <= settings.dead_zone_yaw {
-        yaw_delta = 0.0;
+    let pitch_delta = aim_angles.delta_pitch;
+    let yaw_delta = aim_angles.delta_yaw;
+    if pitch_delta.abs() <= settings.dead_zone_pitch && yaw_delta.abs() <= settings.dead_zone_yaw {
+        *velocity = [0.0, 0.0];
+        return Ok((aim_angles.view_pitch, aim_angles.view_yaw));
     }
     let smooth = (aimbot.get_smooth() / factor).max(1.0);
 
     let smoothed = if settings.smoothing_mode == 0 {
         let dt = delta_time.clamp(0.0001, 0.05);
         let smooth_time = (aimbot.get_smooth() / 100.0).max(0.001);
-        let damp = |current: f32, target: f32, velocity: &mut f32| {
-            let omega = 2.0 / smooth_time;
-            let x = omega * dt;
-            let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
-            let change = current - target;
-            let temp = (*velocity + omega * change) * dt;
-            *velocity = (*velocity - omega * temp) * exp;
-            target + (change + temp) * exp
-        };
         if aimbot.get_aim_entity() != 0 {
-            let pitch = damp(aim_angles.view_pitch, aim_angles.view_pitch + pitch_delta, &mut velocity[0]);
-            let yaw = damp(aim_angles.view_yaw, aim_angles.view_yaw + yaw_delta, &mut velocity[1]);
+            let pitch = smooth_damp(aim_angles.view_pitch, aim_angles.view_pitch + pitch_delta, &mut velocity[0], smooth_time, dt, 180.0);
+            let yaw = smooth_damp(aim_angles.view_yaw, aim_angles.view_yaw + yaw_delta, &mut velocity[1], smooth_time, dt, 180.0);
             (pitch, yaw)
         } else {
             (aim_angles.view_pitch, aim_angles.view_yaw)
         }
-    } else if settings.smoothing_mode == 0 {
+    } else if settings.smoothing_mode == 1 {
         let args = AimbotSmoothArgs {
             target: aimbot.get_aim_entity(),
             current: (aim_angles.view_pitch, aim_angles.view_yaw),
@@ -1185,4 +1204,24 @@ async fn smooth_aim_angles_ext(
         tracing::warn!(?aim_angles, ?smoothed);
     }
     Ok(smoothed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smooth_damp;
+
+    #[test]
+    fn smooth_damp_honors_max_speed() {
+        let mut velocity = 0.0;
+        let output = smooth_damp(0.0, 100.0, &mut velocity, 1.0, 0.1, 5.0);
+        assert!(output < 10.0);
+    }
+
+    #[test]
+    fn smooth_damp_stops_on_overshoot() {
+        let mut velocity = 100.0;
+        let output = smooth_damp(0.0, 1.0, &mut velocity, 0.01, 0.1, 1e9);
+        assert!((0.0..=1.0).contains(&output));
+        assert!(velocity.is_finite());
+    }
 }
