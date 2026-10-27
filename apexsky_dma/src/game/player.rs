@@ -186,7 +186,13 @@ impl apex1_common::aimbot::AimEntity for PlayerEntity {
             .get(hitbox_id as usize)
             .map(|hitbox| hitbox.bone as usize)
         {
-            math::add(self.origin, self.bones.get_pos(bone))
+            // Bone matrices already carry world-space translation. Adding the
+            // entity origin again double-translates every hitbox and produces
+            // invalid aim/ESP coordinates when models use non-zero origins.
+            self.bones.get_pos(bone).unwrap_or_else(|| {
+                tracing::trace!(bone, "invalid or stale bone matrix");
+                [0.0; 3]
+            })
         } else {
             tracing::debug!(?hitbox_id, bone_head=self.studio.bone_head, hitboxes=?self.studio.hitboxes, "{}", s!("invalid hitbox"));
             // fallback

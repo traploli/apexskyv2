@@ -18,11 +18,15 @@ fi
 command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 2; }
 test -x "$PACKER" || { echo "missing packer: $PACKER" >&2; exit 2; }
 
-# Update and validate offsets before compiling anything that embeds them.
-python3 "$ROOT/tools/update_offsets.py" \
-  --profile "$ROOT/apex1_common/resource/default/offsets-v3.0.2.23.ini" \
-  --etag-file "$ROOT/apex1_common/resource/default/offsets-v3.0.2.23.ini.etag" \
-  --min-updates 100
+# Network updating is opt-in: APEXSKY_AUTO_UPDATE=1 ./tools/build_release.sh
+if [[ "${APEXSKY_AUTO_UPDATE:-0}" == "1" ]]; then
+  python3 "$ROOT/tools/update_offsets.py" \
+    --profile "$ROOT/apex1_common/resource/default/offsets-v3.0.2.23.ini" \
+    --etag-file "$ROOT/apex1_common/resource/default/offsets-v3.0.2.23.ini.etag" \
+    --min-updates 100
+else
+  echo "offset auto-update disabled; using the selected local profile"
+fi
 
 cargo +nightly build --release --target "$TARGET" -p apexsky_dma -p apexsky_overlay
 rustup target add wasm32-wasip2 --toolchain "$WASM_TOOLCHAIN"

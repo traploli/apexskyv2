@@ -35,12 +35,13 @@ impl BoneArray {
         let bones = &mut self.v[..];
         let _ = api.vm_read_into(ptr, bones).await;
     }
-    pub fn get_pos(&self, bone: usize) -> [f32; 3] {
-        if let Some(matrix) = self.v.get(bone) {
-            [matrix[3], matrix[7], matrix[11]]
+    pub fn get_pos(&self, bone: usize) -> Option<[f32; 3]> {
+        let matrix = self.v.get(bone)?;
+        let pos = [matrix[3], matrix[7], matrix[11]];
+        if pos.iter().all(|value| value.is_finite()) && pos != [0.0; 3] {
+            Some(pos)
         } else {
-            tracing::debug!(bone, ?self.v, "{}", s!("711aac39-e83c-4788 invalid bone"));
-            [0.0; 3]
+            None
         }
     }
 }

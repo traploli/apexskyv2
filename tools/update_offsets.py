@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Fetch Apex Legends offsets and safely merge them into Apexsky's native INI.
+"""Fetch or import Apex Legends offsets and safely merge them into Apexsky's native INI.
 
-The API's ETag is persisted next to the profile.  A 304 leaves the profile
-untouched.  Unknown API fields are ignored; existing Apexsky fields absent
-from the dump are deliberately preserved.
+The API's ETag is persisted next to the profile. A 304 leaves the profile
+untouched. Unknown API fields are ignored; existing Apexsky fields absent
+from the dump are deliberately preserved. Network updating is opt-in in the
+launch/build wrappers; --reference imports a local dump selectively.
 """
 from __future__ import annotations
 
@@ -122,6 +123,54 @@ def merge(profile: Path, payload: dict):
     return original, changed, updates, unmatched
 
 
+REFERENCE_SECTIONS = {"Miscellaneous", "DataMap.C_BaseEntity"}
+REFERENCE_KEYS = {
+    "TimeDateStamp", "CheckSum", "GameVersion", "cl_entitylist",
+    "LocalEntityHandle", "LocalPlayer", "GlobalVars", "NameList",
+    "CPlayer!camera_origin", "CPlayer!camera_angles",
+    "CBaseAnimating!m_pStudioHdr", "HighlightSettings", "NetworkVarTableLen",
+    "m_currentFrame.viewOffset", "m_vecAbsVelocity", "m_vecAbsOrigin",
+}
+
+
+def merge_reference(profile: Path, reference: Path):
+    """Import only safe, semantically matched keys from an offline dump."""
+    original = profile.read_text()
+    reference_text = reference.read_text()
+    lines = original.splitlines()
+    sections = parse_ini(original)
+    source = parse_ini(reference_text)
+    updates = {}
+    for section in REFERENCE_SECTIONS:
+        for key in REFERENCE_KEYS:
+            source_line = source.get(section, {}).get(key)
+            target_line = sections.get(section, {}).get(key)
+            if source_line is None or target_line is None:
+                continue
+            raw = reference_text.splitlines()[source_line].split("=", 1)[1].strip()
+            if key != "GameVersion" and not HEX.fullmatch(raw):
+                continue
+            updates[(section, key)] = raw
+            lines[target_line] = re.sub(
+                r"(?<=^" + re.escape(key) + r")=.*$", "=" + raw, lines[target_line]
+            )
+    if not updates:
+        raise ValueError(f"reference contains no safe keys present in {profile}")
+    changed = "\n".join(lines) + ("\n" if original.endswith("\n") else "")
+    return original, changed, updates
+
+
+def reference_metadata(reference: Path):
+    text = reference.read_text()
+    sections = parse_ini(text)
+    result = {}
+    for key in ("GameVersion", "TimeDateStamp", "CheckSum"):
+        line = sections.get("Miscellaneous", {}).get(key)
+        if line is not None:
+            result[key] = text.splitlines()[line].split("=", 1)[1].strip()
+    return result
+
+
 def validate_candidate(text: str):
     sections = parse_ini(text)
     required = {
@@ -177,6 +226,21 @@ def fetch(url: str, etag_path: Path):
 
 
 def update_once(args) -> bool:
+    if args.reference:
+        original, changed, updates = merge_reference(args.profile, args.reference)
+        validate_candidate(changed)
+        if changed != original:
+            backup = args.profile.with_suffix(args.profile.suffix + ".pre-reference.bak")
+            if not backup.exists():
+                atomic_write(backup, original)
+            atomic_write(args.profile, changed)
+        metadata = reference_metadata(args.reference)
+        print(
+            f"imported {len(updates)} safe reference keys from {args.reference}; "
+            f"latest={metadata.get('GameVersion', '<unknown>')} "
+            f"checksum={metadata.get('CheckSum', '<unknown>')}"
+        )
+        return changed != original
     status, etag, payload = fetch(args.url, args.etag_file)
     if status == 304:
         print("not modified (304)")
@@ -201,6 +265,8 @@ def main():
     p.add_argument("--url", default=DEFAULT_URL)
     p.add_argument("--profile", type=Path, required=True)
     p.add_argument("--etag-file", type=Path, required=True)
+    p.add_argument("--reference", type=Path,
+                   help="offline reference INI; skips the network updater")
     p.add_argument("--min-updates", type=int, default=100)
     p.add_argument("--interval", type=int, default=0, help="poll interval in seconds; 0 means once")
     args = p.parse_args()

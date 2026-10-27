@@ -52,6 +52,13 @@ impl GameState {
         // Update globals and ctx
         self.client.update(api, ctx).await;
 
+        // Do not touch entity-dependent state until the game reports the fully
+        // connected state. The module can be discoverable during transitions
+        // while the entity list is still null or being rebuilt.
+        if !ctx.world_ready {
+            return;
+        }
+
         // Update others
         tokio::join!(
             self.entity_list.update(api, ctx),

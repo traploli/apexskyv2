@@ -25,17 +25,22 @@ impl ClientState {
         let base_addr = api.apex_base;
         let data = &ctx.data;
 
-        // Connection signon state
-        if ctx.ticked(25, 24) {
-            if let Ok(signon_state) = api.vm_read::<i32>(base_addr.field(data.signon_state)).await {
+        // Read signon state before any entity-dependent reads. The launcher can
+        // expose a valid module base before the entity list is initialized; using
+        // that base while signon is not FULL can turn a null list into a crash.
+        // This read is intentionally not rate-limited.
+        match api.vm_read::<i32>(base_addr.field(data.signon_state)).await {
+            Ok(signon_state) => {
                 ctx.world_ready = signon_state == sdk::SIGNONSTATE_FULL;
                 ctx.connected = self.signon_state != sdk::SIGNONSTATE_FULL
                     && signon_state == sdk::SIGNONSTATE_FULL;
-                //tracing::debug!(signon_state, self.signon_state, ctx.connected);
                 self.signon_state = signon_state;
             }
-        } else {
-            ctx.connected = false;
+            Err(_) => {
+                ctx.world_ready = false;
+                ctx.connected = false;
+                self.signon_state = 0;
+            }
         }
 
         let task_current_level_name = async {

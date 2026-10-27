@@ -67,7 +67,7 @@ impl BaseNPCEntity {
         if self.is_ducking() { 36.0 } else { 60.0 }
     }
     pub fn get_bone_pos(&self, bone: usize) -> [f32; 3] {
-        sdk::add(self.origin, self.bones.get_pos(bone))
+        self.bones.get_pos(bone).unwrap_or([0.0; 3])
     }
 }
 #[async_trait]

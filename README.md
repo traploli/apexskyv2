@@ -8,15 +8,19 @@ This repository contains the source, native module, WASM offset parser, runtime
 package manifests, and build/update scripts. Generated binaries, packages,
 archives, runtime logs, and local updater caches are intentionally ignored.
 
-## Offset updater
+## Offset profiles and updater
 
-The updater polls the read-only Apex offsets API and uses ETag caching:
+The selected local profile is used by default. Network updating is optional and
+must be explicitly enabled; this prevents stale or unavailable API data from
+silently changing a working profile.
+
+The optional API source uses ETag caching:
 
 ```text
 https://www.cheatoffsets.com/api/games/apex/current
 ```
 
-Run it with:
+Enable the API updater explicitly:
 
 ```bash
 python3 tools/update_offsets.py \
@@ -25,9 +29,32 @@ python3 tools/update_offsets.py \
   --min-updates 100
 ```
 
-Updates are validated and written atomically. An unchanged response returns
+Import an offline reference selectively, without network access:
+
+```bash
+python3 tools/update_offsets.py \
+  --profile apex1_common/resource/default/offsets-v3.0.2.23.ini \
+  --etag-file apex1_common/resource/default/offsets-v3.0.2.23.ini.etag \
+  --reference /path/to/Interfaces
+```
+
+The reference importer reports the source game version and checksum, copies
+only explicitly safe keys already present in the native profile, preserves
+Apexsky-specific semantic mappings, and creates a `.pre-reference.bak` backup.
+It deliberately does not copy lookalike `RecvTable` values into the
+`DataMap.C_BaseEntity` fields consumed by the shadow-origin implementation.
+
+`tools/run_with_offsets.sh` uses the local profile by default; pass `--update`
+to enable network polling. `tools/build_release.sh` uses the local profile by
+default; set `APEXSKY_AUTO_UPDATE=1` to enable network polling.
+
+Updates are validated and written atomically. An unchanged API response returns
 HTTP 304 and preserves the existing profile. Missing API fields preserve the
 last known-good native values.
+
+The latest local reference imported from `/home/sad/Desktop/Interfaces` is
+`v3.0.3.65`, checksum `0x419366e`. Fields absent from that reference remain at
+the last known-good native values and are not fabricated.
 
 ## Build
 
