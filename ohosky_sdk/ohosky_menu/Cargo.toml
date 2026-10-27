@@ -1,0 +1,13 @@
+[package]
+name = "ohosky_menu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+chinese-lunisolar-calendar = "0.2.1"
+chrono = "0.4.44"
+crossterm = "0.29.0"
+ratatui = { version = "0.30.0", features = ["all-widgets", "serde"] }
+tracing = "0.1.44"
+unicode-width = "0.2.2"

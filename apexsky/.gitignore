@@ -1,0 +1,35 @@
+# Rust build output
+target/
+
+# Local release/output directories
+dist/
+dist-*/
+*.spk
+apexsky_overlay
+skyrun
+*.zip
+
+# Runtime logs and generated state
+log/
+native_home/
+overlay-ui.json
+settings.toml
+
+# Local editor files
+.idea/
+.vscode/
+
+# Offset updater cache and local backups
+*.etag
+*.pre-api.bak
+*.pre-2026-dump.bak
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Python caches
+__pycache__/
+*.py[cod]

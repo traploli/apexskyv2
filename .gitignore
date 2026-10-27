@@ -1,35 +1,14 @@
-# Rust build output
+.vs/
+x64/
+*.o
 target/
-
-# Local release/output directories
-dist/
-dist-*/
-*.spk
-apexsky_overlay
-skyrun
-*.zip
-
-# Runtime logs and generated state
-log/
-native_home/
-overlay-ui.json
-settings.toml
-
-# Local editor files
-.idea/
+*.rs.bk
+*.swp
+*.dylib
+.vscode
+Cargo.lock
+!apexsky/Cargo.lock
+!esp_iot/Cargo.lock
 .vscode/
-
-# Offset updater cache and local backups
-*.etag
-*.pre-api.bak
-*.pre-2026-dump.bak
-
-# Environment and secrets
-.env
-.env.*
-*.pem
-*.key
-
-# Python caches
-__pycache__/
-*.py[cod]
+build/
+.cache

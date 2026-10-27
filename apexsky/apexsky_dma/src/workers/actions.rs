@@ -1,0 +1,1523 @@
+use anyhow::Context;
+use apex1_common::pb::apexlegends::{AimKeyState, AimTargetInfo, SpectatorInfo, TreasureClue};
+use apex1_common::utils::get_unix_timestamp_in_millis;
+use apex1_common::{
+    aimbot::{AimEntity, calc_angle, calc_fov},
+    config::Settings,
+    love_players::LoveStatus,
+};
+use ndarray::arr1;
+use ohosky_api::common::dmalib::IMemAccess;
+use ohosky_api::common::msg::ISharedWatchValue;
+use ohosky_api::common::share::ISharableValue;
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::atomic::Ordering};
+use tokio::sync::watch;
+use tokio::time::{Instant, sleep};
+use tracing::{Instrument, info_span};
+
+use crate::G_OFFSETS;
+use crate::PRINT_LATENCY;
+use crate::SharedStateType;
+use crate::apexdream::{
+    base::math,
+    sdk::HighlightBits,
+    state::GameState,
+    state::entities::{BaseNPCEntity, DeathboxEntity, Entity, LootEntity},
+};
+use crate::game::{data::*, player::GamePlayer, player::QuickLooting};
+use crate::global_state::G_STATE;
+use crate::obfstr as s;
+use crate::skyapi::{self, dmalib};
+use crate::workers::items::LootInt;
+
+const REQUEST_ID: usize = 0; //obfstr::random!(usize);
+
+#[tracing::instrument(skip_all)]
+pub async fn actions_loop(
+    mut active: watch::Receiver<bool>,
+    shared_state: SharedStateType,
+    access_tx: crate::MemAccess,
+    aim_key_tx: watch::Sender<AimKeyState>,
+    aim_select_tx: watch::Sender<Vec<AimTargetInfo>>,
+    update_time_tx: watch::Sender<f64>,
+    mut aim_select_rx: watch::Receiver<Vec<AimTargetInfo>>,
+    mut items_glow_rx: watch::Receiver<Vec<(u64, u8)>>,
+) -> anyhow::Result<()> {
+    tracing::debug!("{}", s!("task start"));
+
+    let event_tick = skyapi::SharedWatchValue::new(&apex1_common::global::MSG.action_tick, "").0;
+    let event_attached =
+        skyapi::SharedWatchValue::new(&apex1_common::global::MSG.game_attached, "").0;
+    let event_unattached =
+        skyapi::SharedWatchValue::new(&apex1_common::global::MSG.game_unattached, "").0;
+    fn usermod_send_event<T: ISharableValue>(tx: &impl ISharedWatchValue<T>, v: T) {
+        if let Err(e) = tx.update(v) {
+            tracing::error!(%e, "{}", s!("usermod_send_event"));
+        };
+    }
+
+    let mut apexdream =
+        crate::apexdream::Instance::new(G_STATE.lock().unwrap().config.settings.is_access_fast);
+    let mut start_instant = Instant::now();
+    let mut fps_checkpoint_instant = Instant::now();
+    let mut last_checkpoint_frame: i32 = 0;
+    let mut actions_tick: i64 = -1;
+    let mut log_items: usize = 0;
+    let mut log_players: usize = 0;
+    let mut world_ready: bool;
+    let mut player_ready: bool;
+
+    while *active.borrow_and_update() {
+        sleep(Duration::from_secs(2)).await;
+
+        match access_tx.get_baseaddr(100).await? {
+            Some(baseaddr) => {
+                shared_state
+                    .game_baseaddr
+                    .store(baseaddr, Ordering::Release);
+                usermod_send_event(&event_attached, ());
+            }
+            None => {
+                shared_state.game_baseaddr.store(0, Ordering::Release);
+                continue;
+            }
+        }
+
+        while *active.borrow_and_update() {
+            sleep(Duration::from_millis(2)).await; // don't change xD
+
+            let loop_duration = start_instant.elapsed().as_millis().try_into()?;
+            start_instant = Instant::now();
+
+            let apex_base = match access_tx.get_baseaddr(100).await? {
+                Some(addr) => {
+                    shared_state.game_baseaddr.store(addr, Ordering::Release);
+                    addr
+                }
+                None => {
+                    shared_state.game_baseaddr.store(0, Ordering::Release);
+                    usermod_send_event(&event_unattached, ());
+                    tracing::warn!("{}", s!("Unattached to the game"));
+                    break;
+                }
+            };
+            let mem = &access_tx;
+
+            /* Hot Variables Update Begin */
+
+            actions_tick += 1;
+            let verbose = actions_tick % 1_000 == 0;
+
+            // Tick game state
+            let (tick_duration, apex_state, apex_update_ctx, is_newly_connected) = {
+                (
+                    {
+                        let mut api = crate::apexdream::api::Api {
+                            apex_base: apex_base.into(),
+                            mem_access: mem.clone(),
+                            req_id: REQUEST_ID,
+                        };
+                        let tick_start = Instant::now();
+                        apexdream.tick_state(&mut api).await;
+                        tick_start.elapsed().as_millis().try_into()?
+                    },
+                    apexdream.get_state(),
+                    apexdream.get_update_ctx(),
+                    apexdream.is_newly_connected(),
+                )
+            };
+
+            if verbose {
+                tracing::trace!(loop_duration, tick_duration, ?apex_state.client, "{}", s!("game state update"));
+            }
+
+            // // Update spectator checker
+            // if actions_tick % 15 == 0 && player_ready {
+            //     let lplayer_ptr = apex_state.client.local_player_ptr;
+            //     // Init spectator checker
+            //     if prev_lplayer_ptr != lplayer_ptr {
+            //         init_spec_checker(lplayer_ptr);
+            //         prev_lplayer_ptr = lplayer_ptr;
+            //     }
+            //     // Update yaw to spec checker
+            //     apex_state.players().for_each(|pl| {
+            //         if pl.eadp_uid == 0 || pl.team_num < 0 || pl.team_num > 50 {
+            //             return;
+            //         }
+            //         apexsky::tick_yaw(pl.entity_ptr.into_raw(), pl.yaw);
+            //     });
+            // }
+
+            // Calc game FPS
+            let game_fps_update = {
+                let delta_frame = apex_state.client.framecount - last_checkpoint_frame;
+                if delta_frame < 90 {
+                    None
+                } else if delta_frame > 120 {
+                    last_checkpoint_frame = apex_state.client.framecount;
+                    fps_checkpoint_instant = Instant::now();
+                    None
+                } else {
+                    let duration = fps_checkpoint_instant.elapsed().as_secs_f32();
+                    //trace!(delta_frame, duration, "{}", s!("calc game fps"));
+
+                    last_checkpoint_frame = apex_state.client.framecount;
+                    fps_checkpoint_instant = Instant::now();
+
+                    Some(delta_frame as f32 / duration)
+                }
+            };
+
+            // To hold only one lock at a time, clone G_STATE.config.settings
+            let g_settings = G_STATE.lock().unwrap().config.settings.clone();
+            // if verbose {
+            //     trace!(?g_settings);
+            // }
+
+            // Update client state
+            {
+                world_ready = apex_state.is_in_game() && apex_state.local_player().is_some();
+                player_ready = world_ready
+                    && shared_state
+                        .players
+                        .read()
+                        .get(&shared_state.local_player_ptr.load(Ordering::Acquire))
+                        .is_some();
+
+                shared_state
+                    .world_ready
+                    .store(world_ready, Ordering::Release);
+                shared_state
+                    .frame_count
+                    .store(apex_state.client.framecount, Ordering::Release);
+                shared_state
+                    .tick_num
+                    .store(actions_tick.try_into().unwrap(), Ordering::Release);
+                shared_state
+                    .tick_duration
+                    .store(tick_duration, Ordering::Release);
+                shared_state
+                    .actions_duration
+                    .store(loop_duration, Ordering::Release);
+
+                {
+                    let mut lock = shared_state.game_fps.lock();
+                    if let Some(fps_update) = game_fps_update {
+                        tracing::trace!(fps_update);
+                        *lock = fps_update;
+                    } else if *lock < f32::EPSILON {
+                        *lock = g_settings.game_fps;
+                    }
+                }
+                *shared_state.view_matrix.lock() = apex_state.client.view_matrix;
+
+                if PRINT_LATENCY {
+                    println!(
+                        "{}{:.1}",
+                        s!("actions data latency "),
+                        get_unix_timestamp_in_millis() as f64 - apex_state.time * 1000.0
+                    );
+                }
+
+                if verbose {
+                    if !world_ready {
+                        let local_player = apex_state.local_player();
+                        tracing::debug!(
+                            signon_state = apex_state.client.signon_state,
+                            levelname = apex_state.client.level_name,
+                            local_ent = ?apex_state.client.local_entity,
+                            ?local_player,
+                        );
+                        if local_player.is_none() {
+                            tracing::debug!(entity_list = ?apex_state.entity_list);
+                        }
+                    }
+                    tracing::trace!(?shared_state, localplayer = ?apex_state.local_player());
+                }
+            }
+
+            // Send key status to aimbot worker
+            aim_key_tx
+                .send(AimKeyState {
+                    aimbot_hotkey_1: if apex_state
+                        .is_button_down(g_settings.hotkey_settings.aimbot_key1)
+                    {
+                        g_settings.hotkey_settings.aimbot_key1
+                    } else {
+                        0
+                    },
+                    aimbot_hotkey_2: if apex_state
+                        .is_button_down(g_settings.hotkey_settings.aimbot_key2)
+                    {
+                        g_settings.hotkey_settings.aimbot_key2
+                    } else {
+                        0
+                    },
+                    attack_button: apex_state.buttons.in_attack.down[0],
+                    zoom_button: apex_state.buttons.in_zoom.down[0],
+                    triggerbot_hotkey: if apex_state
+                        .is_button_down(g_settings.hotkey_settings.triggerbot_key1)
+                    {
+                        g_settings.hotkey_settings.triggerbot_key1
+                    } else {
+                        0
+                    },
+                    attack_state: match apex_state.buttons.in_attack.state.try_into() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            tracing::error!(?apex_state.buttons.in_attack.state,
+                                            "{}", s!("err convert in_attack to i32"));
+                            continue;
+                        }
+                    },
+                    quick_looting_hotkey: if apex_state
+                        .is_button_down(g_settings.hotkey_settings.quick_looting_key)
+                    {
+                        g_settings.hotkey_settings.quick_looting_key
+                    } else {
+                        0
+                    },
+                })
+                .unwrap_or_else(|e| {
+                    tracing::error!(%e, ?aim_key_tx, "{}", s!("send key status"));
+                });
+
+            // Update entities
+            if world_ready {
+                let mut players = HashMap::new();
+                apex_state.players().for_each(|pl| {
+                    // FIXME: skip wrong entity
+                    if pl.eadp_uid == 0 || pl.team_num < 0 || pl.team_num > 10000 {
+                        return;
+                    }
+                    let game_player = GamePlayer::new(
+                        pl.clone(),
+                        apex_state,
+                        &mut G_STATE.lock().unwrap().config,
+                    );
+                    let entity_ptr = pl.entity_ptr.into_raw();
+                    let player = Arc::new(game_player);
+                    players.insert(entity_ptr, player);
+                });
+
+                let local_player_ptr: u64 = Some(apex_state.client.local_player_ptr)
+                    .take_if(|ptr| players.contains_key(ptr))
+                    .unwrap_or(0);
+                let view_player_ptr: u64 = apex_state
+                    .local_player()
+                    .map(|entity| entity.get_entity_ptr())
+                    .unwrap_or(0);
+
+                if actions_tick % 2 != 0 {
+                    // Keep the entity map coherent on the fast tick as well. The previous
+                    // path updated `players` but left removed/replaced entries in
+                    // `aim_entities`, causing stale visibility/context decisions after
+                    // streaming transitions.
+                    let mut aim_entities = shared_state.aim_entities.write();
+                    aim_entities.retain(|ptr, _| players.contains_key(ptr));
+                    for (k, v) in &players {
+                        aim_entities.insert(*k, v.clone());
+                    }
+                    *shared_state.players.write() = players;
+                } else {
+                    let mut npcs: HashMap<u64, Arc<dyn AimEntity>> = HashMap::new();
+                    apex_state
+                        .entities_as::<BaseNPCEntity>()
+                        .for_each(|entity| {
+                            npcs.insert(entity.entity_ptr.into_raw(), Arc::new(entity.clone()));
+                        });
+
+                    let mut treasure_clues: HashMap<u64, TreasureClue> = HashMap::new();
+                    if let Some(local_position) = players
+                        .get(&local_player_ptr)
+                        .map(|l| arr1(&l.get_entity().origin))
+                    {
+                        apex_state.entities_as::<LootEntity>().for_each(|entity| {
+                            let distance = (arr1(&entity.origin) - &local_position)
+                                .mapv(|x| x * x)
+                                .sum()
+                                .sqrt();
+                            let clue = TreasureClue {
+                                entity_handle: entity.entity_ptr.into_raw(),
+                                item_id: entity.custom_script_int,
+                                custom_item_id: (entity.custom_script_int as u64
+                                    | ((entity.survival_property as u64) << 32)),
+                                position: Some(entity.origin.into()),
+                                distance,
+                            };
+                            treasure_clues.insert(clue.entity_handle, clue);
+                        });
+                        apex_state
+                            .entities_as::<DeathboxEntity>()
+                            .for_each(|entity| {
+                                let distance = (arr1(&entity.origin) - &local_position)
+                                    .mapv(|x| x * x)
+                                    .sum()
+                                    .sqrt();
+                                let clue = TreasureClue {
+                                    entity_handle: entity.entity_ptr.into_raw(),
+                                    item_id: ItemId::ApexskyItemDeathBox.0,
+                                    custom_item_id: 0,
+                                    position: Some(entity.origin.into()),
+                                    distance,
+                                };
+                                treasure_clues.insert(clue.entity_handle, clue);
+                            });
+                    }
+                    let loot_count = treasure_clues.len();
+                    tracing::trace!(loot_count, "{}", s!("loots updated"));
+
+                    let mut aim_entities: HashMap<u64, Arc<dyn AimEntity>> = HashMap::new();
+                    for (k, v) in &players {
+                        aim_entities.insert(*k, v.clone());
+                    }
+                    for (k, v) in &npcs {
+                        aim_entities.insert(*k, v.clone());
+                    }
+                    for (k, v) in &treasure_clues {
+                        if v.distance > 40.0 * 3.0 {
+                            continue;
+                        }
+                        aim_entities.insert(*k, Arc::new(QuickLooting(*v)));
+                    }
+                    let entity_count = aim_entities.len();
+                    tracing::trace!(entity_count, "{}", s!("AimEntities updated"));
+
+                    *shared_state.aim_entities.write() = aim_entities;
+                    *shared_state.npcs.write() = npcs;
+                    *shared_state.players.write() = players;
+                    *shared_state.treasure_clues.write() = treasure_clues;
+                }
+
+                shared_state
+                    .local_player_ptr
+                    .store(local_player_ptr, Ordering::Release);
+                shared_state
+                    .view_player_ptr
+                    .store(view_player_ptr, Ordering::Release);
+            } else {
+                shared_state.local_player_ptr.store(0, Ordering::Release);
+                shared_state.view_player_ptr.store(0, Ordering::Release);
+                shared_state.aim_entities.write().clear();
+                shared_state.npcs.write().clear();
+                shared_state.players.write().clear();
+                shared_state.treasure_clues.write().clear();
+            }
+
+            if let Err(e) = update_time_tx.send(apex_state.time) {
+                tracing::error!(%e, ?e, "{}", s!("send update time"));
+            }
+
+            // usermod_send_event(UserModEvent::ActionTick(ActionTickData {
+            //     input_state: apex_state.input_system.button_state,
+            // }));
+            usermod_send_event(&event_tick, actions_tick.to_le_bytes().to_vec());
+
+            // Log WeaponId
+            if is_newly_connected {
+                tracing::info!(?apex_state.string_tables.weapon_names);
+                if apex_state.is_firing_range()
+                    && apex_state.string_tables.weapon_names.len() != WEAPON_LIST.len()
+                {
+                    match (|| -> anyhow::Result<()> {
+                        use std::fs;
+                        use std::io::Write;
+
+                        let weapons_json =
+                            serde_json::to_string(&apex_state.string_tables.weapon_names)?;
+                        let path = crate::DATA_DIR.join(s!("updated_weapon.json"));
+                        let mut json_file = fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(path)?;
+                        write!(json_file, "{weapons_json}")?;
+                        Ok(())
+                    })() {
+                        Ok(()) => {
+                            tracing::info!("{}", s!("Exported to updated_weapon.json"));
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, ?e);
+                        }
+                    }
+                }
+            }
+
+            // Log Players
+            if actions_tick % 40 == 0 && !apex_state.is_firing_range() {
+                let players = shared_state.players.read().clone();
+                let player_count = players.len();
+                if player_count == 0 {
+                    tracing::debug!("{}", s!("wait players"));
+                } else if player_count > log_players {
+                    let mut player_list: Vec<(u32, String)> = players
+                        .values()
+                        .map(|entity| {
+                            (
+                                entity.get_entity().index,
+                                entity.get_buf().player_name.to_owned(),
+                            )
+                        })
+                        .collect();
+                    player_list.sort_by_key(|a| a.0);
+                    tracing::info!(?player_list, "{player_count}{}", s!(" players sorted"));
+                    log_players = player_count;
+                }
+            }
+
+            // Log ItemId
+            if actions_tick % 40 == 0 && apex_state.is_firing_range() {
+                let loot_count = shared_state.treasure_clues.read().len();
+                if loot_count == 0 {
+                    tracing::debug!("{}", s!("wait items"));
+                } else if loot_count > log_items {
+                    // create new item list
+                    let item_namelist = apex_state
+                        .entities_as::<LootEntity>()
+                        .map(|entity| LootInt {
+                            int: entity.custom_script_int,
+                            model: entity.model_name.string.clone(),
+                        })
+                        .filter(|loot| !(loot.int == 0 && loot.model.is_empty()))
+                        .collect::<HashSet<LootInt>>();
+                    let mut item_namelist: Vec<LootInt> = item_namelist.into_iter().collect();
+                    item_namelist.sort_by_key(|a| a.int);
+                    tracing::info!("{loot_count}{}", s!(" items sorted"));
+                    log_items = loot_count;
+
+                    match crate::workers::items::export_new_items(item_namelist) {
+                        Ok(()) => {
+                            tracing::info!("{}", s!("Exported to updated_item.json"));
+                        }
+                        Err(e) => {
+                            let treasure_clues = shared_state.treasure_clues.read().clone();
+                            tracing::warn!(%e, ?treasure_clues, "{loot_count}{}", s!(" items sorted"))
+                        }
+                    }
+                }
+            }
+
+            /* Hot Variables Update End */
+
+            if actions_tick % 30_000 == 0 {
+                actions_tick = 0;
+            }
+            if actions_tick % 2 != 0 {
+                // at least 30ms // don't change xD
+                continue;
+            }
+
+            /* Cold Variables Update Start */
+
+            // // Debug reading game_state.ClientState
+            // if actions_tick % 100 == 0 {
+            //     tracing::warn!(?apex_state.client);
+            // }
+
+            tracing::trace_span!("Update state in global settings").in_scope(|| {
+                let firing_range_mode = apex_state.is_firing_range();
+                let tdm = apex_state
+                    .gamemode()
+                    .is_some_and(|gamemode| [s!("control"), s!("freedm")].contains(&gamemode));
+
+                let mut update_menu = false;
+                let g_state = &mut G_STATE.lock().unwrap();
+
+                if g_state.config.settings.firing_range != firing_range_mode {
+                    g_state.config.settings.firing_range = firing_range_mode;
+                    update_menu = true;
+                }
+                if g_state.config.settings.team_death_match != tdm {
+                    g_state.config.settings.team_death_match = tdm;
+                    update_menu = true;
+                }
+                if g_state.config.settings.calc_game_fps
+                    && let Some(fps_update) = game_fps_update
+                {
+                    g_state.config.settings.game_fps = fps_update;
+                }
+                if update_menu {
+                    crate::global_state::G_TUI_FORCE_UPDATE.store(true, Ordering::Release);
+                }
+            });
+
+            // Send aim targets
+            aim_select_tx
+                .send(collect_aim_targets(
+                    shared_state.clone(),
+                    apex_state,
+                    &g_settings,
+                    items_glow_rx.clone(),
+                ))
+                .unwrap_or_else(|e| {
+                    tracing::error!(%e, ?aim_select_tx, "{}", s!("send aim targets"));
+                });
+
+            if actions_tick % 4 == 0 {
+                tracing::trace_span!("Spectator check").in_scope(|| {
+                    if player_ready {
+                        let Some(lplayer_ptr) = shared_state.get_local_player_ptr() else {
+                            return;
+                        };
+                        let players = shared_state.players.read().clone();
+                        let Some(local_player) = players.get(&lplayer_ptr) else {
+                            return;
+                        };
+                        let lplayer_team = local_player.get_buf().team_num;
+                        let alter_local_team =
+                            shared_state.map_testing_local_team.load(Ordering::Acquire);
+                        let tdm_toggle = g_settings.team_death_match;
+                        let is_teammate = |team_num| {
+                            teammate_check(team_num, lplayer_team, alter_local_team, tdm_toggle)
+                        };
+
+                        // Update local entity yew
+                        // let yew = mem.apex_mem_read::<f32>(lplayer_ptr + OFFSET_YAW)?;
+                        // trace!(lplayer_ptr, ?yew);
+                        // apexsky::tick_yew(lplayer_ptr, yew);
+
+                        let mut teammates: Vec<_> = players
+                            .values()
+                            .filter_map(|target_entity| {
+                                let player_buf = target_entity.get_buf();
+                                if is_teammate(player_buf.team_num) {
+                                    Some(player_buf.to_owned())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        teammates.sort_by_key(|a| a.team_member_index);
+
+                        // Update spectator checker
+                        let tmp_specs: Vec<SpectatorInfo> = players
+                            .iter()
+                            .filter_map(|(&player_ptr, player)| {
+                                apex_state
+                                    .get_observer_target(player.get_entity().get_info().handle)
+                                    .and_then(|observer_target| {
+                                        let target_ptr = observer_target.entity_ptr.into_raw();
+                                        if player_ptr == lplayer_ptr {
+                                            Some(target_ptr)
+                                        } else if target_ptr == lplayer_ptr {
+                                            Some(player_ptr)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .and_then(|item_ptr| {
+                                        let player_buf = players.get(&item_ptr)?.get_buf();
+                                        Some(SpectatorInfo {
+                                            ptr: item_ptr,
+                                            name: player_buf.player_name.clone(),
+                                            is_teammate: is_teammate(player_buf.team_num),
+                                            love_status: player_buf
+                                                .love_status
+                                                .try_into()
+                                                .unwrap_or_else(|_| {
+                                                    tracing::error!(
+                                                        love_state = player_buf.love_status,
+                                                        ?player_buf
+                                                    );
+                                                    LoveStatus::Normal
+                                                })
+                                                as i32,
+                                        })
+                                    })
+                            })
+                            .collect();
+
+                        // Update spectator namelist
+                        let (allied_spectators, spectators): (Vec<_>, Vec<_>) =
+                            tmp_specs.into_iter().partition(|info| info.is_teammate);
+
+                        *shared_state.spectator_list.lock() = (allied_spectators, spectators);
+                        *shared_state.teammates.lock() = teammates;
+                    } else {
+                        {
+                            let mut lock = shared_state.spectator_list.lock();
+                            lock.0.clear();
+                            lock.1.clear();
+                        }
+                        //shared_state.teammates.lock().clear();
+                    }
+                });
+
+                if player_ready {
+                    let highlight_injected =
+                        shared_state.highlight_injected.load(Ordering::Acquire);
+
+                    // Inject highlight settings
+                    let task_inject_highlights = async {
+                        // Highlight settings are global and are expensive/racy to rewrite every
+                        // action tick. Reinject only after startup or after a failed injection;
+                        // repeatedly rewriting the context table makes the game visibly flicker
+                        // while entity context writes are happening.
+                        if (g_settings.glow_settings.player_glow
+                            || g_settings.glow_settings.item_glow
+                            || g_settings.glow_settings.weapon_model_glow)
+                            && player_ready
+                            && !highlight_injected
+                        {
+            tracing::error!("{}", s!("DIAG running inject_highlight this tick"));
+                            match inject_highlight(mem, apex_state.client.framecount, &g_settings, apex_base)
+                                .await
+                            {
+                                Ok(_) => {
+                                    tracing::error!("{}", s!("DIAG inject_highlight OK, global table written"));
+                                    shared_state
+                                        .highlight_injected
+                                        .store(true, Ordering::Release);
+                                }
+                                Err(e) => {
+                                    tracing::error!(%e, "{}", s!("DIAG inject_highlight FAILED"));
+                                    tracing::warn!(%e, ?e, "{}", s!("err inject highlight settings"));
+                                }
+                            }
+                        }
+                    }.instrument(info_span!("1"));
+
+                    // Write Player Glow
+
+                    // tracing::debug!(
+                    //     playre_glow_on = g_settings.player_glow,
+                    //     highlight_injected,
+                    //     need_update = aim_select_rx.has_changed().unwrap_or(false),
+                    //     write_count = aim_select_rx.borrow().iter().count(),
+                    //     "debug player glow"
+                    // );
+                    let task_player_glow = async {
+                        if g_settings.glow_settings.player_glow && highlight_injected {
+                        // Reapply contexts every action tick. The game can clear highlight
+                        // state during ADS, landing, and entity-state transitions; tying this
+                        // write to watch-channel changes leaves glow intermittent when the target
+                        // vector is unchanged.
+                        // Use the validated target snapshot for writes. The broad player map
+                        // can contain an entity that was freed or replaced between state scans;
+                        // writing its highlight fields can crash the game. Keep the safer list
+                        // until we add an atomic entity-pointer/liveness validation path.
+                        let writes = aim_select_rx
+                            .borrow()
+                            .iter()
+                            .map(|target| {
+                                let target_ptr = target.entity_ptr;
+                                let highlight_context_id = player_glow(
+                                    target,
+                                    apex_state.client.framecount,
+                                    g_settings.game_fps,
+                                    g_settings.glow_settings.player_glow_armor_color,
+                                    g_settings.glow_settings.player_glow_love_user,
+                                    g_settings.glow_settings.player_filled_toggle,
+                                );
+                                (target_ptr, highlight_context_id)
+                            })
+                            .collect::<Vec<_>>();
+                        // Spawn one write-batch per target, but join all of them before this
+                        // tick's player-glow task resolves. Fire-and-forget spawns here used to
+                        // let `tokio::join!` below (line ~850) move on to the next action tick
+                        // as soon as the writes were *scheduled*, not once they *landed* — DMA
+                        // round trips routinely outlive one tick. Two overlapping in-flight
+                        // batches for the same target_ptr then raced, and whichever batch's
+                        // writes hit the wire last won, independent of which batch carried the
+                        // current `target.is_visible` state. That produced glow flicker in both
+                        // directions: a correct NOTVIZ write getting clobbered by a stale VISIBLE
+                        // one, and vice versa — matching "sometimes visible players don't render
+                        // either," not just the occluded case.
+                        let handles: Vec<_> = writes
+                            .into_iter()
+                            .map(|(target_ptr, highlight_context_id)| {
+                                let mem = mem.clone();
+                                let shadow_api = crate::apexdream::api::Api {
+                                    apex_base: apex_base.into(),
+                                    mem_access: mem.clone(),
+                                    req_id: REQUEST_ID,
+                                };
+                                tokio::spawn(async move {
+                                    // UC thread 716406 (late Sept/Oct 2026 posts) indicates EAC
+                                    // shadow-maps the per-entity highlight struct the same way it
+                                    // shadow-maps absOrigin: a primary-DTB write to these two
+                                    // fields can land on a decoy page the renderer never reads
+                                    // during a real match, while firing-range dummies (no match,
+                                    // no shadow mapping engaged the same way) take the primary
+                                    // write fine — matching "works in firing range, flickers or
+                                    // dies for real players." Route the two render-critical
+                                    // fields through the secondary DTB when memflow-direct is
+                                    // configured; fall back to the primary-DTB write otherwise so
+                                    // non-memflow setups keep today's (partial) behavior instead
+                                    // of losing glow outright.
+                                    let context_write = async {
+                                        let addr = target_ptr
+                                            + G_OFFSETS.entity_highlight_generic_context
+                                            - 1;
+                                        match crate::apexdream::base::cr3::write_shadow(
+                                            &shadow_api,
+                                            addr,
+                                            shadow_api.apex_base.into_raw(),
+                                            &highlight_context_id,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => {
+                                                tracing::trace!(target_ptr, addr, highlight_context_id, "{}", s!("DIAG context write via SHADOW dtb ok"));
+                                                Ok(())
+                                            }
+                                            Err(shadow_err) => {
+                                                tracing::trace!(?shadow_err, target_ptr, addr, highlight_context_id, "{}", s!("DIAG context shadow write FAILED, falling back to primary"));
+                                                let r = mem.write::<u8>(addr, &highlight_context_id, dmalib::PRIO_LOW, 0)
+                                                    .await;
+                                                tracing::trace!(?r, target_ptr, addr, "{}", s!("DIAG context write via PRIMARY dtb result"));
+                                                r
+                                            }
+                                        }
+                                    };
+                                    let visible_type_write = async {
+                                        let addr = target_ptr + OFFSET_GLOW_VISIBLE_TYPE;
+                                        // UC thread 716406: two independent, near-identical,
+                                        // explicitly-commented working samples both write `1`
+                                        // here ("Allow glow through walls"), not `2`. `2` was
+                                        // never actually sourced — it was copied from the
+                                        // original code without verification. `1` also matches
+                                        // this project's own default not-visible color/style
+                                        // intent far better than an unverified guess.
+                                        match crate::apexdream::base::cr3::write_shadow(
+                                            &shadow_api,
+                                            addr,
+                                            shadow_api.apex_base.into_raw(),
+                                            &1i32,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => Ok(()),
+                                            Err(shadow_err) => {
+                                                tracing::trace!(?shadow_err, addr, "{}", s!("shadow write player glow through-wall, falling back to primary"));
+                                                mem.write::<i32>(addr, &1, dmalib::PRIO_LOW, 0).await
+                                            }
+                                        }
+                                    };
+                                    if let Err(e) = tokio::try_join!(
+                                        context_write,
+                                        visible_type_write,
+                                        mem.write::<f32>(
+                                            target_ptr + OFFSET_GLOW_DISTANCE,
+                                            &8.0E+4,
+                                            dmalib::PRIO_LOW,
+                                            0
+                                        ),
+                                        mem.write::<f32>(
+                                            target_ptr + G_OFFSETS.entity_fade_dist,
+                                            &g_settings.aimbot_settings.aim_dist,
+                                            dmalib::PRIO_LOW,
+                                            0
+                                        ),
+                                        mem.write::<i32>(
+                                            target_ptr + OFFSET_GLOW_FIX,
+                                            // Same two UC thread samples: value `2` with an
+                                            // explicit `// Fix glow` comment, not `0`.
+                                            &2,
+                                            dmalib::PRIO_LOW,
+                                            0
+                                        ),
+                                    ) {
+                                        tracing::error!(
+                                            ?e,
+                                            target_ptr,
+                                            highlight_context_id,
+                                            "{}",
+                                            s!("write player glow")
+                                        );
+                                    }
+                                })
+                            })
+                            .collect();
+                        // A panicked write task must not silently vanish — log it the same way
+                        // an Err from the write itself is logged above.
+                        for result in futures_util::future::join_all(handles).await {
+                            if let Err(e) = result {
+                                tracing::error!(?e, "{}", s!("player glow write task panicked"));
+                            }
+                        }
+                    }
+                    }
+                    .instrument(info_span!("2"));
+
+                    // Write Items Glow
+                    let task_items_glow =
+                        async {
+                            if g_settings.glow_settings.item_glow
+                        && highlight_injected
+                        && items_glow_rx.has_changed().unwrap_or_else(|e| {
+                            tracing::error!(%e, ?items_glow_rx, "{}", s!("perform items glow"));
+                            false
+                        })
+                    {
+                        let writes = items_glow_rx.borrow_and_update().clone();
+                        for (ptr, ctx_id) in writes {
+                            let mem = mem.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = mem
+                                    .write::<u8>(
+                                        ptr + G_OFFSETS.entity_highlight_generic_context - 1,
+                                        &ctx_id,
+                                        dmalib::PRIO_LOW,
+                                        0,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!(?e, ptr, ctx_id, "{}", s!("write loot glow"))
+                                }
+                            });
+                        }
+                    }
+                        }
+                        .instrument(info_span!("3"));
+
+                    // Weapon model glow
+                    let task_vmodel_glow = async {
+                        if !(g_settings.glow_settings.weapon_model_glow && highlight_injected) {
+                            return;
+                        }
+                        let Some(local_player) = shared_state
+                            .get_local_player_ptr()
+                            .and_then(|lplayer_ptr| shared_state.read_cached_player(&lplayer_ptr))
+                            .filter(|pl| pl.is_alive())
+                        else {
+                            return;
+                        };
+                        let Ok(view_model_handle) = mem
+                            .read::<u64>(
+                                local_player.get_entity_ptr() + G_OFFSETS.cplayer_viewmodels,
+                                dmalib::PRIO_LOW,
+                                0,
+                            )
+                            .await
+                            .inspect_err(|e| {
+                                tracing::warn!(?e, "{}", s!("read player view_model"))
+                            })
+                        else {
+                            return;
+                        };
+
+                        let handle = (view_model_handle & 0xffff) as u32;
+                        let view_model_ptr = apex_state.entity_ptr(handle);
+                        let Some(ptr) = view_model_ptr else {
+                            return;
+                        };
+                        let (al_spec, spec) = {
+                            let spec_list = shared_state.spectator_list.lock();
+                            (spec_list.0.len(), spec_list.1.len())
+                        };
+                        let ctx_id = if spec > 0 {
+                            HIGHLIGHT_DEATH_BOX
+                        } else if al_spec > 0 {
+                            HIGHLIGHT_LOOT_ENERGY
+                        } else {
+                            HIGHLIGHT_WEAPON_RAINBOW
+                        };
+                        if let Err(e) = mem
+                            .write::<u8>(
+                                ptr.into_raw() + G_OFFSETS.entity_highlight_generic_context - 1,
+                                &ctx_id,
+                                dmalib::PRIO_LOW,
+                                0,
+                            )
+                            .await
+                        {
+                            tracing::error!(?e, ?ptr, ctx_id, "{}", s!("write weapon model glow"))
+                        }
+                    }
+                    .instrument(tracing::info_span!("4"));
+
+                    tokio::join!(
+                        task_inject_highlights,
+                        task_player_glow,
+                        task_items_glow,
+                        task_vmodel_glow,
+                    );
+
+                    if actions_tick % 160 == 0 {
+                        tracing::trace!(?apex_update_ctx.intresting);
+                    }
+
+                    // println!("in_use state {}", apex_state.buttons.in_use.state);
+                    // if verbose {
+                    //     tracing::warn!(ent_dir = ?apex_state.entity_list.gce.directory);
+                    // }
+                    // {"al_shield_anchor_l": "CScriptProp",
+                    // "-1": "CInfoTarget",
+                    // "shield_throw": "CScriptMover",
+                    // "vortex_trigger_area": "CVortexSphere",
+                    // "rebuilt_door": "CScriptProp",
+                    // "caustic_trap": "CScriptProp",
+                    // "player": "CPlayer",
+                    // "dynamic_dummie": "CAI_BaseNPC",
+                    // "crypto_camera": "CScriptProp",
+                    // "al_shield_low_r": "CScriptProp",
+                    // "al_shield_low_l": "CScriptProp",
+                    // "al_shield_anchor_c": "CScriptProp",
+                    // "axiom_impact_zone_threat": "CScriptProp",
+                    // "drone_no_minimap_object": "CPlayerVehicle",
+                    // "al_shield_anchor_r": "CScriptProp",
+                    // "": "CScriptNetDataGlobalNonRewind"}
+                }
+            }
+        }
+    }
+    tracing::debug!("{}", s!("task end"));
+    Ok(())
+}
+
+#[tracing::instrument(skip_all)]
+fn collect_aim_targets(
+    state: SharedStateType,
+    apex_state: &GameState,
+    g_settings: &Settings,
+    items_glow_rx: watch::Receiver<Vec<(u64, u8)>>,
+) -> Vec<AimTargetInfo> {
+    if !state.is_world_ready() {
+        return vec![];
+    }
+
+    let quick_looting = apex_state.is_button_down(g_settings.hotkey_settings.quick_looting_key);
+
+    let aim_entities = state.aim_entities.read().clone();
+    let players = state.players.read().clone();
+    let treasure_clues = if quick_looting {
+        Some(state.treasure_clues.read().clone())
+    } else {
+        None
+    };
+
+    let Some(lplayer) = state
+        .get_local_player_ptr()
+        .and_then(|ptr| players.get(&ptr))
+    else {
+        return vec![];
+    };
+
+    let alter_local_team_id = state.map_testing_local_team.load(Ordering::Acquire);
+
+    // Iterate over all targetable entities
+    let mut aim_targets: Vec<AimTargetInfo> = aim_entities
+        .values()
+        .filter_map(|entity| {
+            process_player(
+                lplayer,
+                entity.as_ref(),
+                &players,
+                alter_local_team_id,
+                g_settings,
+            )
+        })
+        .collect();
+
+    if let Some(loots) = treasure_clues {
+        aim_targets.extend(items_glow_rx.borrow().iter().filter_map(|(ptr, _)| {
+            let clue = loots.get(ptr)?;
+            let distance = clue.distance;
+            (distance < 40.0 * 2.5).then_some({
+                let target_entity = QuickLooting(*clue);
+                let fov = calculate_target_fov(lplayer.as_ref(), &target_entity);
+                AimTargetInfo {
+                    fov,
+                    distance,
+                    is_visible: target_entity.is_visible(),
+                    is_knocked: target_entity.is_knocked(),
+                    health_points: 1,
+                    love_status: LoveStatus::Normal as i32,
+                    is_kill_leader: false,
+                    entity_ptr: target_entity.get_entity_ptr(),
+                    is_npc: false,
+                    is_loot: target_entity.is_loot(),
+                    is_crosshair_target: target_entity.is_crosshair_target(),
+                }
+            })
+        }));
+    }
+
+    aim_targets.sort_by(|a, b| {
+        a.distance.partial_cmp(&b.distance).unwrap_or_else(|| {
+            tracing::error!(?a, ?b, "{}", s!("sort"));
+            panic!()
+        })
+    });
+    aim_targets
+}
+
+#[tracing::instrument(skip_all)]
+fn process_player(
+    local_player: &GamePlayer,
+    target_entity: &dyn AimEntity,
+    players: &HashMap<u64, Arc<GamePlayer>>,
+    alter_local_team_id: i32,
+    g_settings: &Settings,
+) -> Option<AimTargetInfo> {
+    if target_entity.is_loot() {
+        return None;
+    }
+
+    let lplayer_ptr = local_player.get_entity().get_entity_ptr();
+    let target_ptr = target_entity.get_entity_ptr();
+
+    let entity_team = target_entity.get_team_num();
+    let local_team = local_player.get_buf().team_num;
+
+    let is_teammate = teammate_check(
+        entity_team,
+        local_team,
+        alter_local_team_id,
+        g_settings.team_death_match,
+    );
+    // trace!(target_ptr, entity_team, is_teammate);
+
+    // Exclude eliminated players
+    if !target_entity.is_alive() {
+        return None;
+    }
+
+    // Teammate and 1v1 check
+    if !g_settings.feature_settings.onevone {
+        match (
+            g_settings.firing_range,
+            target_entity.is_player(),
+            is_teammate,
+        ) {
+            (true, true, _) => return None,
+            (false, _, true) => return None,
+            _ => (),
+        }
+    }
+
+    // Exclude self
+    if target_ptr == lplayer_ptr {
+        return None;
+    }
+
+    // Exclude players in invalid team
+    if target_entity.is_player() && !(0..=50).contains(&entity_team) {
+        tracing::warn!(?entity_team, ?target_entity, "{}", s!("invalid team"));
+        return None;
+    }
+
+    // Calc distance
+    // Excluding targets that are too far or too close
+    let distance = {
+        let target_pos = target_entity.get_position();
+        let local_pos = local_player.get_entity().get_position();
+        math::dist(target_pos, local_pos)
+    };
+
+    if !distance.is_normal() || distance > g_settings.max_dist || distance < 10.0 {
+        return None;
+    }
+
+    // Calc FOV
+    let fov = calculate_target_fov(local_player.get_entity(), target_entity);
+    if !fov.is_finite() {
+        // inf/neg_inf/nan
+        return None;
+    }
+
+    let target_player = target_entity.is_player().then(|| {
+        let Some(p) = players.get(&target_ptr) else {
+            tracing::error!(?target_ptr, "{}", s!("UNREACHABLE"));
+            panic!();
+        };
+        p
+    });
+
+    Some(AimTargetInfo {
+        fov,
+        distance,
+        is_visible: target_entity.is_visible(),
+        is_knocked: target_entity.is_knocked(),
+        health_points: { target_entity.get_shield_health() + target_entity.get_health() },
+        love_status: {
+            if let Some(target_player) = target_player {
+                target_player.get_buf().love_status.try_into()
+                .unwrap_or_else(|_| {
+                    tracing::error!(love_state = target_player.get_buf().love_status, player_buf = ?target_player.get_buf());
+                    LoveStatus::Normal
+                })
+            } else {
+                // not player (dummy)
+                if g_settings.yuan_p {
+                    LoveStatus::Love
+                } else {
+                    LoveStatus::Normal
+                }
+            }
+        } as i32,
+        is_kill_leader: {
+            if let Some(target_player) = target_player {
+                GamePlayer::is_kill_leader(target_player.get_buf())
+            } else {
+                false
+            }
+        },
+        entity_ptr: target_ptr,
+        is_npc: target_player.is_none(),
+        is_loot: false,
+        is_crosshair_target: target_entity.is_crosshair_target(),
+    })
+}
+
+#[tracing::instrument(skip_all)]
+fn player_glow(
+    target: &AimTargetInfo,
+    frame_count: i32,
+    game_fps: f32,
+    player_glow_armor_color: bool,
+    player_glow_love_user: bool,
+    player_filled_toggle: bool,
+) -> u8 {
+    let game_fps = if game_fps.is_normal() {
+        i32::max(1, game_fps as i32)
+    } else {
+        60
+    };
+    let mut setting_index = {
+        if target.is_knocked {
+            HIGHLIGHT_PLAYER_KNOCKED
+        } else if player_filled_toggle {
+            // The occluded context is the only one configured with the fill-capable
+            // function bits. It must be used for both visible and hidden targets when
+            // filled glow is enabled.
+            HIGHLIGHT_PLAYER_NOTVIZ
+        } else if player_glow_armor_color {
+            match target.health_points {
+                0..=100 => HIGHLIGHT_PLAYER_ORANGE,
+                101..=150 => HIGHLIGHT_PLAYER_WHITE,
+                151..=175 => HIGHLIGHT_PLAYER_BLUE,
+                176..=200 => HIGHLIGHT_PLAYER_PURPLE,
+                201..=225 => HIGHLIGHT_PLAYER_RED,
+                _ => HIGHLIGHT_PLAYER_BLACK,
+            }
+        } else if target.is_visible {
+            HIGHLIGHT_PLAYER_VISIBLE
+        } else {
+            // HIGHLIGHT_PLAYER_NOTVIZ is the fill-capable context (see above) and a fill
+            // highlight never renders on an occluded entity — the model isn't rasterized
+            // when culled, so there's nothing for the fill pass to color. Use the outline-only
+            // twin here so the default not-visible case actually draws through walls, the same
+            // way HIGHLIGHT_PLAYER_VISIBLE does.
+            HIGHLIGHT_PLAYER_NOTVIZ_OUTLINE
+        }
+    };
+
+    // love player glow
+    if player_glow_love_user {
+        let frame_frag = frame_count / game_fps;
+        if frame_frag % 2 == 0 {
+            match target.love_status.try_into().unwrap_or(LoveStatus::Normal) {
+                LoveStatus::Love => {
+                    setting_index = HIGHLIGHT_PLAYER_RAINBOW;
+                }
+                LoveStatus::Hate => {
+                    setting_index = HIGHLIGHT_PLAYER_BLACK;
+                }
+                _ => (),
+            }
+        }
+    }
+
+    // kill leader glow
+    if target.is_kill_leader {
+        let frame_frag = frame_count / game_fps;
+        if frame_frag % 3 == 0 {
+            setting_index = HIGHLIGHT_PLAYER_ORANGE;
+        }
+    }
+
+    setting_index
+}
+
+#[tracing::instrument(skip_all)]
+async fn inject_highlight(
+    mem: &crate::MemAccess,
+    frame_count: i32,
+    g_settings: &Settings,
+    module_base: u64,
+) -> anyhow::Result<()> {
+    let bits_loot = HighlightBits::new(
+        g_settings.glow_settings.loot_filled,
+        125,
+        64,
+        7,
+        true,
+        false,
+    );
+    let bits_outline = HighlightBits::new(0, 125, 64, 7, true, false);
+    let bits_player_fill = HighlightBits::new(
+        g_settings.glow_settings.player_glow_inside_value,
+        g_settings.glow_settings.player_glow_outline_value,
+        g_settings.glow_settings.player_glow_outline_size,
+        g_settings.glow_settings.player_glow_inside_opacity,
+        true,
+        false,
+    );
+    let bits_player_outline = HighlightBits::new(
+        0,
+        g_settings.glow_settings.player_glow_outline_value,
+        g_settings.glow_settings.player_glow_outline_size,
+        g_settings.glow_settings.player_glow_inside_opacity,
+        true,
+        false,
+    );
+    let bits_nobody_outline = HighlightBits::new(0, 125, 64, 0, false, false);
+    let rainbow_col = rainbow_color(frame_count);
+
+    let highlight_settings_inject: [(u8, &HighlightBits, [f32; 3]); 22] = [
+        (HIGHLIGHT_LOOT_HEAVY, &bits_loot, [0.0, 1.0, 1.0]),
+        (HIGHLIGHT_LOOT_LIGHT, &bits_loot, [1.0, 0.5490, 0.0]),
+        (HIGHLIGHT_LOOT_RED, &bits_loot, [1.0, 0.0, 0.0]),
+        (HIGHLIGHT_LOOT_BLUE, &bits_loot, [0.0, 0.7490, 1.0]),
+        (HIGHLIGHT_LOOT_GREY, &bits_loot, [0.6, 0.6, 0.6]),
+        (HIGHLIGHT_LOOT_WHITE, &bits_loot, [1.0, 1.0, 1.0]),
+        (HIGHLIGHT_LOOT_ENERGY, &bits_loot, [0.2, 1.0, 0.0]),
+        (HIGHLIGHT_LOOT_PURPLE, &bits_loot, [0.2941, 0.0, 0.5098]),
+        (HIGHLIGHT_LOOT_GOLD, &bits_loot, [1.0, 0.8431, 0.0]),
+        (HIGHLIGHT_DEATH_BOX, &bits_outline, [1.0, 0.0, 0.0]),
+        (
+            HIGHLIGHT_WEAPON_RAINBOW,
+            if g_settings.glow_settings.weapon_model_transparent {
+                &bits_nobody_outline
+            } else {
+                &bits_outline
+            },
+            rainbow_col,
+        ),
+        (
+            HIGHLIGHT_PLAYER_KNOCKED,
+            &bits_player_outline,
+            [
+                g_settings.color_settings.glow_r_knocked
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_g_knocked
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_b_knocked
+                    * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_VISIBLE,
+            &bits_player_outline,
+            [
+                g_settings.color_settings.glow_r_viz
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_g_viz
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_b_viz
+                    * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_NOTVIZ,
+            &bits_player_fill,
+            [
+                g_settings.color_settings.glow_r_not
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_g_not
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_b_not
+                    * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            // Same color as HIGHLIGHT_PLAYER_NOTVIZ, outline-only bits instead of fill. This is
+            // the context the default (non-fill-toggle) not-visible case actually uses now — see
+            // player_glow() — because a fill highlight can't render on a culled/occluded model.
+            HIGHLIGHT_PLAYER_NOTVIZ_OUTLINE,
+            &bits_player_outline,
+            [
+                g_settings.color_settings.glow_r_not
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_g_not
+                    * g_settings.glow_settings.player_brightness as f32,
+                g_settings.color_settings.glow_b_not
+                    * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_BLACK,
+            &bits_player_fill,
+            [
+                2.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                2.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                2.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_ORANGE,
+            &bits_player_fill,
+            [
+                255.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                165.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                0.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_WHITE,
+            &bits_player_fill,
+            [
+                247.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                247.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                247.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_BLUE,
+            &bits_player_fill,
+            [
+                39.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                178.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                255.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_PURPLE,
+            &bits_player_fill,
+            [
+                206.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                59.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                255.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_RED,
+            &bits_player_fill,
+            [
+                219.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                2.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+                2.0 / 256.0 * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+        (
+            HIGHLIGHT_PLAYER_RAINBOW,
+            &bits_player_fill,
+            [
+                rainbow_col[0] * g_settings.glow_settings.player_brightness as f32,
+                rainbow_col[1] * g_settings.glow_settings.player_brightness as f32,
+                rainbow_col[2] * g_settings.glow_settings.player_brightness as f32,
+            ],
+        ),
+    ];
+
+    let Some(base) = mem.get_baseaddr(dmalib::PRIO_HIGH).await? else {
+        tracing::warn!("{}", s!("inject highlight get baseaddr"));
+        return Ok(());
+    };
+    let highlight_settings_ptr = mem
+        .read::<u64>(base + G_OFFSETS.highlight_settings, dmalib::PRIO_HIGH, 0)
+        .await?;
+    let mut futs_write_highlight_settings: Vec<tokio::task::JoinHandle<anyhow::Result<()>>> =
+        Vec::with_capacity(highlight_settings_inject.len());
+    for (context_id, &bits, color) in highlight_settings_inject {
+        let context_offset = highlight_settings_ptr + 0x34 * context_id as u64;
+        futs_write_highlight_settings.push(tokio::spawn({
+            let mem = mem.clone();
+            let shadow_api = crate::apexdream::api::Api {
+                apex_base: module_base.into(),
+                mem_access: mem.clone(),
+                req_id: 0,
+            };
+            async move {
+                // Same reasoning as the per-entity context/through-wall writes: this global
+                // table's `highlight_settings_ptr` was itself read under the primary DTB, so
+                // even the shadow write below writes to whatever address that primary-DTB read
+                // handed us — if the *pointer itself* is a decoy, no DTB choice for the write
+                // fixes that. This only closes the gap if the pointer is real but the table
+                // memory behind it is shadow-mapped, which is still worth ruling out: every
+                // other write surface in this pipeline needed shadow routing to actually land
+                // in a real match, and this was the one surface still on primary-DTB-only.
+                let bits_write = async {
+                    match crate::apexdream::base::cr3::write_shadow(
+                        &shadow_api,
+                        context_offset,
+                        module_base,
+                        &bits,
+                    )
+                    .await
+                    {
+                        Ok(()) => Ok(()),
+                        Err(shadow_err) => {
+                            tracing::error!(?shadow_err, context_offset, "{}", s!("shadow write highlight bits, falling back to primary"));
+                            mem.write::<HighlightBits>(context_offset, &bits, dmalib::PRIO_HIGH, 0).await
+                        }
+                    }
+                };
+                let color_write = async {
+                    match crate::apexdream::base::cr3::write_shadow(
+                        &shadow_api,
+                        context_offset + 4,
+                        module_base,
+                        &color,
+                    )
+                    .await
+                    {
+                        Ok(()) => Ok(()),
+                        Err(shadow_err) => {
+                            tracing::error!(?shadow_err, context_offset, "{}", s!("shadow write highlight color, falling back to primary"));
+                            mem.write::<[f32; 3]>(context_offset + 4, &color, dmalib::PRIO_HIGH, 0).await
+                        }
+                    }
+                };
+                tokio::try_join!(bits_write, color_write)
+                    .context(format!("{context_id:?}"))?;
+                Ok(())
+            }
+        }));
+    }
+    for task in futs_write_highlight_settings {
+        task.await??;
+    }
+    tracing::trace!(highlight_settings_ptr);
+
+    Ok(())
+}
+
+#[tracing::instrument(skip_all)]
+fn calculate_target_fov(from: &dyn AimEntity, target: &dyn AimEntity) -> f32 {
+    let view_angles = from.get_sway_angles();
+    let local_camera = from.get_cam_pos();
+    let entity_position = target.get_bone_position_by_hitbox(2);
+    let angle = calc_angle(&local_camera, &entity_position);
+    calc_fov(&view_angles, &angle)
+}
+
+fn rainbow_color(frame_count: i32) -> [f32; 3] {
+    const FREQUENCY: f32 = 0.1; // Adjust the speed of color change
+    const AMPLITUDE: f32 = 0.5; // Adjust the amplitude of color change
+
+    // Use the sine function to generate rainbow color variation
+    let frame_number = frame_count as f32;
+    let r = (FREQUENCY * frame_number + 0.0).sin() * AMPLITUDE + 0.5;
+    let g = (FREQUENCY * frame_number + 2.0).sin() * AMPLITUDE + 0.5;
+    let b = (FREQUENCY * frame_number + 4.0).sin() * AMPLITUDE + 0.5;
+
+    // Clamp the colors to the range [0, 1]
+    [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
+}
+
+fn teammate_check(
+    entity_team: i32,
+    local_team: i32,
+    map_testing_local_team: i32,
+    tdm_toggle: bool,
+) -> bool {
+    if tdm_toggle {
+        let ent_team = if entity_team % 2 == 1 { 1 } else { 2 };
+        let loc_team = if local_team % 2 == 1 { 1 } else { 2 };
+        tracing::trace!(
+            target_team = ent_team,
+            local_team = loc_team,
+            "{}",
+            s!("TDM check")
+        );
+        ent_team == loc_team
+    } else {
+        entity_team == local_team
+            || (map_testing_local_team != 0 && entity_team == map_testing_local_team)
+    }
+}
