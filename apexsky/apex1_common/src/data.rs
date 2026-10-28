@@ -13,19 +13,15 @@ pub static GAME_VER_DX12_PROCESS_NAME: Lazy<SecretString> =
 // m_ammoPoolCount - 0x8
 pub const OFFSET_YAW: u64 = 0x229c - 0x8;
 //pub const OFFSET_GLOW_CONTEXT_ID: u64 = 0x29c;
-// These three were hardcoded Rust literals, never wired into the offsets.ini pipeline that
-// `tools/update_offsets.py` keeps current — so they silently rotted while every offset
-// sourced from G_OFFSETS kept getting refreshed. The per-entity highlight struct (DT_HighlightSettings)
-// has shifted by a cumulative -0x10 across at least two patches documented on UC thread 716406:
-// 0x26c/0x264/0x278 (checked in here, matches posts through 11 Sept 2026) -> 0x25c/0x264(ish)/0x278
-// (22 Sept 2026, post #2294, hyperw36) -> 0x25c/0x254/0x274 (11 Oct 2026, post #2556, mariokarting —
-// the most recent dated sample, two independent authors a month apart agreeing on 0x25c for
-// through-wall). cheatoffsets.com's auto-updater API 304'd against this exact stale value, so it
-// did not catch the drift either — these three need manual tracking until someone wires them
-// into the INI like the rest of G_OFFSETS.
-pub const OFFSET_GLOW_VISIBLE_TYPE: u64 = 0x25c;
-pub const OFFSET_GLOW_DISTANCE: u64 = 0x254;
-pub const OFFSET_GLOW_FIX: u64 = 0x274;
+// Through-wall glow used to live here as three hand-tracked literals (OFFSET_GLOW_VISIBLE_TYPE /
+// _DISTANCE / _FIX @ 0x25c/0x254/0x274) that rotted because nothing refreshed them. They were
+// forum reverse-guesses (the 0x26c -> 0x25c "drift" lineage off UC thread 716406) that the
+// authoritative DT_BaseEntity RecvTable dump for GameVersion v3.0.3.65 does NOT contain — the
+// writes landed in unnamed padding below m_wantsScopeHighlight, which is why no 1/2/5 value ever
+// rendered. The real through-wall control is m_passThroughFlags @ 0x35c, now sourced from the INI
+// pipeline as G_OFFSETS.entity_pass_through_flags so it auto-updates with the rest of G_OFFSETS.
+// Far-fade is already handled by G_OFFSETS.entity_fade_dist (m_fadeDist @ 0x764); the old
+// _DISTANCE/_FIX writes hit dead space and have been removed.
 //pub const OFFSET_MODULE_BASE: u64 = 0x140000000;
 
 #[allow(dead_code)]

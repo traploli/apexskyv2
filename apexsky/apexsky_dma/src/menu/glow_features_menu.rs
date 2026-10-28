@@ -127,10 +127,17 @@ pub(super) fn build_glow_features_menu(
             settings.glow_settings.weapon_model_transparent,
             handler_toggle_settings!(.glow_settings.weapon_model_transparent),
         )
+        // Literal label (no i18n key) to keep the fix self-contained — add a MenuItem* Fluent key
+        // later if you want it localized like the rest.
+        .add_toggle_item(
+            format!("11 - {}", "Player Rainbow Glow"),
+            settings.glow_settings.player_glow_rainbow,
+            handler_toggle_settings!(.glow_settings.player_glow_rainbow),
+        )
         .add_dummy_item()
         .add_item(
             menu_fmt.item_text(format!(
-                "11 - {}",
+                "12 - {}",
                 i18n_msg!(menu_fmt, MenuItemBackToMainMenu)
             )),
             |handle: &mut TerminalMenu, _| {

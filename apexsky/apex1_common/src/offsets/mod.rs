@@ -144,6 +144,7 @@ import_custom_offsets!({
     entiry_name,
     entity_sign_name,
     entity_fade_dist,
+    entity_pass_through_flags,
     collision_property_vec_mins,
     collision_property_vec_maxs,
     animating_skin,

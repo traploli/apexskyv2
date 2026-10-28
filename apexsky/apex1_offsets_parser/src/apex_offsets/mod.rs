@@ -137,6 +137,7 @@ def_offsets!(OffsetsDtBaseEntity: ["RecvTable.DT_BaseEntity"] {
     m_i_name: "m_iName",
     m_script_name_index: "m_scriptNameIndex",
     m_fade_dist: "m_fadeDist",
+    m_pass_through_flags: "m_passThroughFlags",
 });
 
 def_offsets!(OffsetsDtCollisionProperty: ["RecvTable.DT_CollisionProperty"] {
@@ -549,6 +550,7 @@ export_custom_offsets!(
         entiry_name: off!(offsets.dt_base_entity.m_i_name),
         entity_sign_name: off!(offsets.dt_base_entity.m_i_signifier_name),
         entity_fade_dist: off!(offsets.dt_base_entity.m_fade_dist),
+        entity_pass_through_flags: off!(offsets.dt_base_entity.m_pass_through_flags),
         collision_property_vec_mins: off!(offsets.dt_collision_property.m_vec_mins),
         collision_property_vec_maxs: off!(offsets.dt_collision_property.m_vec_maxs),
         animating_skin: off!(offsets.dt_base_animating.m_n_skin),

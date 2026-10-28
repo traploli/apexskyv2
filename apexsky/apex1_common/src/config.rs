@@ -165,6 +165,17 @@ pub struct GlowSettings {
     pub player_glow_inside_opacity: u8,
     pub loot_filled: u8,
     pub loot_outline: u8,
+    // Cycling-rainbow glow for every player. Routes player_glow() to HIGHLIGHT_PLAYER_RAINBOW,
+    // whose color inject_highlight() already advances per-frame via rainbow_color(). Appended at the
+    // struct tail on purpose: GlowSettings is #[repr(C)], so inserting mid-struct would shift every
+    // following field's byte offset and desync any C-ABI reader (e.g. the prebuilt skyrun runtime).
+    // serde default = true so TOMLs written before this field still enable it, matching Default.
+    #[serde(default = "default_true")]
+    pub player_glow_rainbow: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[repr(C)]
@@ -445,6 +456,7 @@ impl Default for GlowSettings {
             item_glow: false,
             player_glow: false,
             player_glow_armor_color: true,
+            player_glow_rainbow: true,
             player_glow_love_user: true,
             weapon_model_glow: false,
             weapon_model_transparent: true,

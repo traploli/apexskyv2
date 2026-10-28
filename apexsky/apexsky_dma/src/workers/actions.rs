@@ -661,18 +661,18 @@ pub async fn actions_loop(
                             && player_ready
                             && !highlight_injected
                         {
-            tracing::error!("{}", s!("DIAG running inject_highlight this tick"));
+            tracing::trace!("{}", s!("DIAG running inject_highlight this tick"));
                             match inject_highlight(mem, apex_state.client.framecount, &g_settings, apex_base)
                                 .await
                             {
                                 Ok(_) => {
-                                    tracing::error!("{}", s!("DIAG inject_highlight OK, global table written"));
+                                    tracing::trace!("{}", s!("DIAG inject_highlight OK, global table written"));
                                     shared_state
                                         .highlight_injected
                                         .store(true, Ordering::Release);
                                 }
                                 Err(e) => {
-                                    tracing::error!(%e, "{}", s!("DIAG inject_highlight FAILED"));
+                                    tracing::trace!(%e, "{}", s!("DIAG inject_highlight FAILED"));
                                     tracing::warn!(%e, ?e, "{}", s!("err inject highlight settings"));
                                 }
                             }
@@ -710,6 +710,7 @@ pub async fn actions_loop(
                                     g_settings.glow_settings.player_glow_armor_color,
                                     g_settings.glow_settings.player_glow_love_user,
                                     g_settings.glow_settings.player_filled_toggle,
+                                    g_settings.glow_settings.player_glow_rainbow,
                                 );
                                 (target_ptr, highlight_context_id)
                             })
@@ -772,50 +773,54 @@ pub async fn actions_loop(
                                             }
                                         }
                                     };
-                                    let visible_type_write = async {
-                                        let addr = target_ptr + OFFSET_GLOW_VISIBLE_TYPE;
-                                        // UC thread 716406: two independent, near-identical,
-                                        // explicitly-commented working samples both write `1`
-                                        // here ("Allow glow through walls"), not `2`. `2` was
-                                        // never actually sourced — it was copied from the
-                                        // original code without verification. `1` also matches
-                                        // this project's own default not-visible color/style
-                                        // intent far better than an unverified guess.
+                                    let pass_through_write = async {
+                                        let addr = target_ptr + G_OFFSETS.entity_pass_through_flags;
+                                        // m_passThroughFlags (@0x35c on v3.0.3.65), INI-sourced via
+                                        // G_OFFSETS so it tracks future patches. This is the real
+                                        // through-wall control; the old hardcoded 0x25c landed in
+                                        // unnamed DT_BaseEntity padding, so no 1/2/5 value ever
+                                        // rendered. The OFFSET is now authoritative — `2` is a
+                                        // provisional enable value, since this is a flags int whose
+                                        // exact through-wall bit still needs an in-game confirm.
+                                        // Tune the value here, not the offset.
                                         match crate::apexdream::base::cr3::write_shadow(
                                             &shadow_api,
                                             addr,
                                             shadow_api.apex_base.into_raw(),
-                                            &1i32,
+                                            &2i32,
                                         )
                                         .await
                                         {
                                             Ok(()) => Ok(()),
                                             Err(shadow_err) => {
                                                 tracing::trace!(?shadow_err, addr, "{}", s!("shadow write player glow through-wall, falling back to primary"));
-                                                mem.write::<i32>(addr, &1, dmalib::PRIO_LOW, 0).await
+                                                mem.write::<i32>(addr, &2, dmalib::PRIO_LOW, 0).await
                                             }
                                         }
                                     };
                                     if let Err(e) = tokio::try_join!(
                                         context_write,
-                                        visible_type_write,
-                                        mem.write::<f32>(
-                                            target_ptr + OFFSET_GLOW_DISTANCE,
-                                            &8.0E+4,
-                                            dmalib::PRIO_LOW,
-                                            0
-                                        ),
+                                        pass_through_write,
                                         mem.write::<f32>(
                                             target_ptr + G_OFFSETS.entity_fade_dist,
                                             &g_settings.aimbot_settings.aim_dist,
                                             dmalib::PRIO_LOW,
                                             0
                                         ),
-                                        mem.write::<i32>(
-                                            target_ptr + OFFSET_GLOW_FIX,
-                                            // Same two UC thread samples: value `2` with an
-                                            // explicit `// Fix glow` comment, not `0`.
-                                            &2,
+                                        // m_hudInfo_visibilityTestAlwaysPasses (byte at
+                                        // bcc_last_visible_time - 3). Forces the game's own
+                                        // visibility test to pass, so the entity stays in the
+                                        // visible/render set instead of being dropped when fully
+                                        // occluded — the gate that the glow visible-type (1 or 2)
+                                        // can't touch, and the reason close-behind-wall players
+                                        // never glowed while far ones did. Side effect: our
+                                        // is_visible read (last_visible_time delta) now reads true
+                                        // for these targets, so occluded players render in the
+                                        // "visible" glow color. Aimbot target select does NOT gate
+                                        // on is_visible, so aim behaviour is unchanged.
+                                        mem.write::<u8>(
+                                            target_ptr + G_OFFSETS.bcc_last_visible_time - 3,
+                                            &1,
                                             dmalib::PRIO_LOW,
                                             0
                                         ),
@@ -1171,6 +1176,7 @@ fn player_glow(
     player_glow_armor_color: bool,
     player_glow_love_user: bool,
     player_filled_toggle: bool,
+    player_glow_rainbow: bool,
 ) -> u8 {
     let game_fps = if game_fps.is_normal() {
         i32::max(1, game_fps as i32)
@@ -1180,11 +1186,27 @@ fn player_glow(
     let mut setting_index = {
         if target.is_knocked {
             HIGHLIGHT_PLAYER_KNOCKED
+        } else if player_glow_rainbow {
+            // Routes every live player to the RAINBOW context (79). NOTE: inject_highlight is
+            // one-shot, so this context's color is written ONCE and stays static — it does NOT
+            // cycle. Driving a real cycle needs the highlight table rewritten over time, which the
+            // one-shot design deliberately avoids (flicker; and under an active shadow-write path it
+            // crashed the game). Left here but gated off by default via `player_glow_rainbow`.
+            HIGHLIGHT_PLAYER_RAINBOW
         } else if player_filled_toggle {
-            // The occluded context is the only one configured with the fill-capable
-            // function bits. It must be used for both visible and hidden targets when
-            // filled glow is enabled.
-            HIGHLIGHT_PLAYER_NOTVIZ
+            // Fill highlights only shade fragments the game actually rasterizes. A visible
+            // target is drawn, so the inside-fill pass renders. An occluded target — above
+            // all a CLOSE one fully behind an occluder — gets occlusion-culled, so the fill
+            // pass has no fragments and the glow vanishes entirely (matching "close occluded
+            // players don't show, only far away ones do": far targets stay rasterized at LOD
+            // / in-frustum and still fill). Keep the fill context only while the target is
+            // visible; route occluded targets to the outline-only twin, which draws through
+            // walls regardless of culling — the same fix the non-filled branch below uses.
+            if target.is_visible {
+                HIGHLIGHT_PLAYER_NOTVIZ
+            } else {
+                HIGHLIGHT_PLAYER_NOTVIZ_OUTLINE
+            }
         } else if player_glow_armor_color {
             match target.health_points {
                 0..=100 => HIGHLIGHT_PLAYER_ORANGE,
@@ -1194,15 +1216,13 @@ fn player_glow(
                 201..=225 => HIGHLIGHT_PLAYER_RED,
                 _ => HIGHLIGHT_PLAYER_BLACK,
             }
-        } else if target.is_visible {
-            HIGHLIGHT_PLAYER_VISIBLE
         } else {
-            // HIGHLIGHT_PLAYER_NOTVIZ is the fill-capable context (see above) and a fill
-            // highlight never renders on an occluded entity — the model isn't rasterized
-            // when culled, so there's nothing for the fill pass to color. Use the outline-only
-            // twin here so the default not-visible case actually draws through walls, the same
-            // way HIGHLIGHT_PLAYER_VISIBLE does.
-            HIGHLIGHT_PLAYER_NOTVIZ_OUTLINE
+            // All live players (visible AND occluded) share the one context that draws through
+            // walls on v3.0.3.65 (id 79). EMPIRICAL (user A/B): occlusion renders only when every
+            // player is on this context — splitting visible onto a separate context (71) re-broke
+            // occluded rendering even though the HighlightBits are byte-identical. Single color by
+            // design (inject colors 79 bright pink); no per-visibility distinction here.
+            HIGHLIGHT_PLAYER_RAINBOW
         }
     };
 
@@ -1394,12 +1414,15 @@ async fn inject_highlight(
             ],
         ),
         (
+            // Repurposed: id 79 is the only player context empirically confirmed to draw through
+            // walls on v3.0.3.65, so ALL live players use it (see player_glow). Bright pink
+            // (R 1.0 / G 0.08 / B 0.58), brightness-scaled like the other context colors.
             HIGHLIGHT_PLAYER_RAINBOW,
             &bits_player_fill,
             [
-                rainbow_col[0] * g_settings.glow_settings.player_brightness as f32,
-                rainbow_col[1] * g_settings.glow_settings.player_brightness as f32,
-                rainbow_col[2] * g_settings.glow_settings.player_brightness as f32,
+                1.0 * g_settings.glow_settings.player_brightness as f32,
+                0.08 * g_settings.glow_settings.player_brightness as f32,
+                0.58 * g_settings.glow_settings.player_brightness as f32,
             ],
         ),
     ];
@@ -1442,7 +1465,7 @@ async fn inject_highlight(
                     {
                         Ok(()) => Ok(()),
                         Err(shadow_err) => {
-                            tracing::error!(?shadow_err, context_offset, "{}", s!("shadow write highlight bits, falling back to primary"));
+                            tracing::trace!(?shadow_err, context_offset, "{}", s!("shadow write highlight bits, falling back to primary"));
                             mem.write::<HighlightBits>(context_offset, &bits, dmalib::PRIO_HIGH, 0).await
                         }
                     }
@@ -1458,7 +1481,7 @@ async fn inject_highlight(
                     {
                         Ok(()) => Ok(()),
                         Err(shadow_err) => {
-                            tracing::error!(?shadow_err, context_offset, "{}", s!("shadow write highlight color, falling back to primary"));
+                            tracing::trace!(?shadow_err, context_offset, "{}", s!("shadow write highlight color, falling back to primary"));
                             mem.write::<[f32; 3]>(context_offset + 4, &color, dmalib::PRIO_HIGH, 0).await
                         }
                     }
