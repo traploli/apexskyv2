@@ -485,6 +485,37 @@ impl Entity for PlayerEntity {
 
             let origin_shadow_ptr = fields.origin_shadow_ptr[0] as u64
                 | ((fields.origin_shadow_ptr[1] as u64) << 32);
+
+            let is_local_player = ctx.local_entity == sdk::EHandle::from(self.index);
+            let abs_origin_dup = [
+                f32::from_bits(fields.abs_origin_dup[0]),
+                f32::from_bits(fields.abs_origin_dup[1]),
+                f32::from_bits(fields.abs_origin_dup[2]),
+            ];
+            // Publish the shadow-DTB probe BEFORE attempting the shadow read, and without
+            // depending on its outcome.
+            //
+            // Both halves are primary-DTB reads: `origin_shadow_ptr` is `entity + 0x170` and the
+            // dup is `localPlayerBase + 0x375C`, neither of which needs a secondary root. An
+            // earlier version published this from inside the success arm of the shadow read
+            // below, which made the probe require a working shadow DTB in order to validate a
+            // shadow DTB — a circular dependency that could never bootstrap. With no probe
+            // published, `cr3::validate_dtb` fell back to the PE header and committed a fresh
+            // decoy root every few seconds, and the highlight mirror then wrote 22 slots through
+            // it into unrelated guest physical memory.
+            if is_local_player {
+                // `self.camera_origin` is this frame's second reference, carrying last tick's
+                // value because it is recomputed further down. One tick of camera travel is well
+                // inside the probe's distance tolerance, and having a second reference resolved
+                // from the offsets profile is what keeps a stale hardcoded dup offset from
+                // vetoing the correct root.
+                crate::apexdream::base::cr3::publish_shadow_probe(
+                    origin_shadow_ptr,
+                    abs_origin_dup,
+                    self.camera_origin,
+                );
+            }
+
             match crate::apexdream::base::cr3::read_shadow::<[f32; 3]>(
                 api,
                 origin_shadow_ptr,
@@ -498,12 +529,8 @@ impl Entity for PlayerEntity {
                     // Local-player-only secondary-DTB cross-check: the dup is readable inline
                     // under the primary DTB, so it has no bearing on remote players at all —
                     // only meaningful once we know `self` *is* the local player.
-                    if ctx.local_entity == sdk::EHandle::from(self.index) {
-                        let dup = [
-                            f32::from_bits(fields.abs_origin_dup[0]),
-                            f32::from_bits(fields.abs_origin_dup[1]),
-                            f32::from_bits(fields.abs_origin_dup[2]),
-                        ];
+                    if is_local_player {
+                        let dup = abs_origin_dup;
                         // One tick of max player movement plus slack: the dup and the shadow
                         // copy are not guaranteed to be sampled on the same tick.
                         const MAX_DRIFT: f32 = 512.0;

@@ -221,14 +221,15 @@ new GameApi().waitMainMod().then(async (game) => {
       // console.log("tickNum=" + tickNum);
       // await sleep(200);
 
-      // try {
-      await action(game, mem, offsets, tickNum);
-      // } catch (err) {
-      //   // Do not print memory read/write failure error messages
-      //   if (err.message !== "fail") {
-      //     console.error(err.name + ": " + err.message);
-      //   }
-      // }
+      try {
+        await action(game, mem, offsets, tickNum);
+      } catch (err) {
+        // Transient memory read/write failures (e.g. during CR3 rotation or game-state changes)
+        // must not kill the worker — log anything unexpected, swallow the rest.
+        if (err.message !== "fail" && err.message !== "invalid_argument") {
+          console.error(err.name + ": " + err.message);
+        }
+      }
     }
   } finally {
     actionTick.close();

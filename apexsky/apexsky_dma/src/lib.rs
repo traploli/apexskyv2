@@ -499,7 +499,7 @@ fn init_logger(print: bool) -> tracing_appender::non_blocking::WorkerGuard {
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| {
             EnvFilter::try_new(s!(
-                "apexsky_dma=error,apex1_common=error,apexsky_dma::apexdream=error,apexsky_dma::actuator=info,apexsky_dma::workers::aim=error,apexsky_dma::workers::actions=error,apexsky_dma::workers::esp=error,apexsky_dma::workers::web=error,apexsky_dma::workers::items=info"
+                "apexsky_dma=error,apex1_common=error,apexsky_dma::apexdream=error,apexsky_dma::apexdream::base::cr3=info,apexsky_dma::actuator=info,apexsky_dma::workers::aim=error,apexsky_dma::workers::actions=info,apexsky_dma::workers::esp=error,apexsky_dma::workers::web=error,apexsky_dma::workers::items=info"
             ))
         })
         .unwrap();
@@ -534,7 +534,15 @@ fn init_logger(print: bool) -> tracing_appender::non_blocking::WorkerGuard {
         .with(file_layer);
     //.with(telemetry)
 
-    if print {
+    // The skyrun TUI draws its menu to this same terminal, so ANY line the formatting layer
+    // writes to stderr lands on top of the menu and corrupts it — which is why trimming
+    // individual messages never fixed it for long; the next chatty call site just took over.
+    // Default to file-only logging (rolling.log keeps everything at the filter's level, and
+    // that is where these get read from anyway) and make the console layer opt-in.
+    let console_log = std::env::var(s!("APEXSKY_CONSOLE_LOG"))
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false);
+    if print && console_log {
         tracing::subscriber::set_global_default(subscriber.with(formatting_layer))
     } else {
         tracing::subscriber::set_global_default(subscriber)

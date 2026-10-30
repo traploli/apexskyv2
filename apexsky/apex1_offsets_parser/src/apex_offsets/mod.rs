@@ -687,4 +687,85 @@ mod test {
         ))
         .unwrap();
     }
+
+    /// Diffs the profile the build currently embeds against a candidate profile, field by field,
+    /// and prints every field that changes or that the candidate cannot resolve.
+    ///
+    /// Swapping an offsets profile wholesale is not obviously safe: a field the candidate's INI
+    /// does not describe parses as 0, and a zero offset is not a harmless no-op — it turns
+    /// `base + offset` into a read or write at `base`, or at the start of the address space when
+    /// the base is itself a dereferenced pointer. This test makes the blast radius visible before
+    /// anything is installed, rather than discovering it in a match.
+    ///
+    /// Run with: `cargo +nightly test -p apex1_offsets_parser diff_candidate -- --nocapture`
+    #[test]
+    fn diff_candidate_offsets_profile() {
+        let current_path = "../apex1_common/resource/default/offsets-v3.0.2.23.ini";
+        let candidate_path = std::env::var("CANDIDATE_OFFSETS")
+            .unwrap_or_else(|_| "../apex1_common/resource/default/offsets-v3.0.3.65.ini".into());
+        let candidate_path = candidate_path.as_str();
+
+        if !std::path::Path::new(candidate_path).exists() {
+            eprintln!("candidate profile absent, nothing to diff: {candidate_path}");
+            return;
+        }
+
+        let current = export_offsets_from_file(Some(current_path.to_string()))
+            .expect("current profile must parse");
+        let candidate = export_offsets_from_file(Some(candidate_path.to_string()))
+            .expect("candidate profile must parse");
+
+        // `CustomOffsets` is a flat `#[repr(C)]` struct of `u64` fields, and serde gives field
+        // names without hand-maintaining a list that would drift from the struct.
+        let current = serde_json::to_value(&current).expect("serialize current");
+        let candidate = serde_json::to_value(&candidate).expect("serialize candidate");
+        let (current, candidate) = match (current, candidate) {
+            (serde_json::Value::Object(a), serde_json::Value::Object(b)) => (a, b),
+            _ => panic!("CustomOffsets did not serialize as an object"),
+        };
+
+        let mut regressions = Vec::new();
+        let mut changes = Vec::new();
+        let mut gains = Vec::new();
+
+        for (field, old) in &current {
+            let old = old.as_u64().unwrap_or(0);
+            let new = candidate.get(field).and_then(|v| v.as_u64()).unwrap_or(0);
+            if old == new {
+                continue;
+            }
+            if new == 0 {
+                // The dangerous direction: we have a value today and would lose it.
+                regressions.push((field.clone(), old));
+            } else if old == 0 {
+                gains.push((field.clone(), new));
+            } else {
+                changes.push((field.clone(), old, new));
+            }
+        }
+
+        regressions.sort();
+        changes.sort();
+        gains.sort();
+
+        eprintln!("\n=== fields that would become 0 (REGRESSIONS: {}) ===", regressions.len());
+        for (field, old) in &regressions {
+            eprintln!("  {field}: {old:#x} -> 0");
+        }
+        eprintln!("\n=== fields that change value ({}) ===", changes.len());
+        for (field, old, new) in &changes {
+            eprintln!("  {field}: {old:#x} -> {new:#x}");
+        }
+        eprintln!("\n=== fields gained (0 -> value) ({}) ===", gains.len());
+        for (field, new) in &gains {
+            eprintln!("  {field}: 0 -> {new:#x}");
+        }
+        eprintln!(
+            "\ntotals: {} regressions, {} changes, {} gains, {} fields compared\n",
+            regressions.len(),
+            changes.len(),
+            gains.len(),
+            current.len()
+        );
+    }
 }
