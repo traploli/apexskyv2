@@ -6,6 +6,7 @@ dist/
 dist-*/
 *.spk
 apexsky_overlay
+!/apexsky_overlay/
 skyrun
 *.zip
 
