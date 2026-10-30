@@ -8,6 +8,9 @@ This repository contains the source, native module, WASM offset parser, runtime
 package manifests, and build/update scripts. Generated binaries, packages,
 archives, runtime logs, and local updater caches are intentionally ignored.
 
+For an end-to-end description of the player, loot, and weapon highlight paths,
+see [README-GLOW.md](README-GLOW.md).
+
 ## Offset profiles and updater
 
 The selected local profile is used by default. Network updating is optional and

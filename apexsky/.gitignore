@@ -33,3 +33,6 @@ settings.toml
 # Python caches
 __pycache__/
 *.py[cod]
+
+# Local build staging directories
+.build-stage-*/
